@@ -104,7 +104,7 @@ See [docs/KERNEL_AUDIT.md](docs/KERNEL_AUDIT.md) for the full audit.
 |-----|-----|----------|
 | CVE-2026-7270 | execve memmove out-of-bounds write | Tier 1 (full exploit published) |
 | CVE-2026-45251 | poll/select use-after-free | Tier 1 (full exploit published) |
-| CVE-2024-43102 | UMTX use-after-free (CVSS 10) | Tier 1 (likely patched on 14.10) |
+| CVE-2024-43102 | UMTX use-after-free (CVSS 10) | Tier 1 (14.10 patch status open — see [umtx correction](https://github.com/ZigZagBoi1/PS5-14.10-Research/pull/41)) |
 | CVE-2025-15547/15576 | FreeBSD jail escapes | Tier 2 |
 
 ## Probes
@@ -188,6 +188,14 @@ This research was built with multiple LLMs working together.
 | WebKit code execution | Not started. |
 | Sandbox escape | Not started. |
 | Kernel exploit | Not started. |
+
+## Related Research
+
+The userland/kernel side of the same 14.10 chain is researched in [ZigZagBoi1/PS5-14.10-Research](https://github.com/ZigZagBoi1/PS5-14.10-Research):
+
+- **Complementary stages.** This repo covers browser → WebKit corruption → arbitrary R/W (Stages 1-2). Theirs covers the userland/kernel side: a Lua loader entry (Hamidashi Creative save file, TCP 9026), a complete 14.10 syscall attack-surface map (working/blocked/lethal, 233+ probes), and 13.60 kernel handler reverse engineering (145/145 syscalls).
+- **Their Stage 3/4 = our kernel audit.** Their [ATTACK_SURFACE.md](https://github.com/ZigZagBoi1/PS5-14.10-Research/blob/master/docs/ATTACK_SURFACE.md) is the validation map for our kernel candidates and Sony-syscall table. Their umtx correction ([PR #41](https://github.com/ZigZagBoi1/PS5-14.10-Research/pull/41)) reopened CVE-2024-43102 reachability on 14.10: `_umtx_op` is syscall 454 and is alive, while all earlier "umtx" tests hit syscall 557.
+- **Shared browser-entry knowledge.** Their live browser tests documented the 14.10 User's Guide domains (`ps5.np.playstation.net`, `manuals.playstation.net`), DNS kit quirks, and Relapse stage-1 death (54/54) — all confirmed on both consoles here (issue #6). Their PR #36 offers an on-device crash oracle for candidate JS cases; we can run cases on request (issue #6).
 
 ## Contact
 

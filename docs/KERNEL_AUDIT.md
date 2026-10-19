@@ -14,7 +14,9 @@ Affects all supported FreeBSD versions. A race condition between `close()` on a 
 
 ### CVE-2024-43102: UMTX Use-After-Free (CVSS 10)
 
-This bug was already exploited on older PS5 firmware (1.00 through 7.61) by prior jailbreak efforts. A full chain exists. It is likely patched on firmware 14.10, but this has not been verified.
+This bug was already exploited on older PS5 firmware (1.00 through 7.61) by prior jailbreak efforts. A full chain exists.
+
+**Patch status on 14.10 is open, not "likely patched".** The umtx evidence correction in [ZigZagBoi1/PS5-14.10-Research PR #41](https://github.com/ZigZagBoi1/PS5-14.10-Research/pull/41) ([evidence note](https://github.com/ZigZagBoi1/PS5-14.10-Research/blob/master/docs/UMTX_454_EVIDENCE.md)) shows that every earlier "umtx" test on 14.10 was issued against syscall **557** (`namedobj_create` in the 13.60 sysent capture) — not `_umtx_op` (454). The only saved executions of 454 on 14.10 are two calls in probe 56i2 (ops 5 and 21, both `ret=0`, op 5 writing a TID-shaped owner word), so the syscall is alive and behaves like `_umtx_op`. `UMTX_OP_SHM` (op 25) and `UMTX_OP_ROBUST_LISTS` (op 26) have never been exercised on 454, and FreeBSD reads their key/params pointer from `uaddr1` — a layout no earlier probe used. Reachability probe 110a (correct-layout SHM create/lookup/alive/destroy cycle) is prepared and awaiting a device run in that repo.
 
 ## Tier 2 -- Medium Priority
 
@@ -35,6 +37,8 @@ Found during binary analysis of PS5 firmware 13.60. All need validation on firmw
 | sys_532 | Out-of-bounds read | Verified on 13.60, needs 14.10 check |
 | sys_558 | Unchecked index | Not yet validated |
 | sys_536 | Negative count accepted | Not yet validated |
+
+14.10 syscall availability from a compromised userland process is being mapped live in [ZigZagBoi1/PS5-14.10-Research](https://github.com/ZigZagBoi1/PS5-14.10-Research): its [ATTACK_SURFACE.md](https://github.com/ZigZagBoi1/PS5-14.10-Research/blob/master/docs/ATTACK_SURFACE.md) records which syscalls work, return -1, or kill the process on 14.10 (233+ probes), and a prepared reachability probe exists for sys 532 (`shm_open2`). Use it as the validation map for this table before writing new probes.
 
 ## Not Applicable to PS5
 

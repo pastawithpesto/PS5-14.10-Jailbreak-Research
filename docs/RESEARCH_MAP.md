@@ -83,7 +83,7 @@ PS5 uses FreeBSD jails for process sandboxing. Candidates:
 - **CVE-2025-15547 / CVE-2025-15576:** FreeBSD jail escape vulnerabilities. Depend on whether nullfs is available on PS5.
 - **Sony syscall bugs:** sys_532 (OOB, verified on 13.60), sys_558 (unchecked index), sys_536 (negative count). All need validation on firmware 14.10.
 
-The sandbox boundaries (which syscalls are available, jail configuration) have not been mapped yet.
+The sandbox boundaries (which syscalls are available, jail configuration) have not been mapped from the browser process yet. However, syscall availability on 14.10 from a compromised userland process is already mapped in [ZigZagBoi1/PS5-14.10-Research](https://github.com/ZigZagBoi1/PS5-14.10-Research) — its [ATTACK_SURFACE.md](https://github.com/ZigZagBoi1/PS5-14.10-Research/blob/master/docs/ATTACK_SURFACE.md) covers working/blocked/lethal syscalls across 233+ probes from a game-process Lua loader, which is the closest available proxy for a post-WebKit userland process. Also see its umtx correction (PR #41): `_umtx_op(454)` is alive on 14.10 and `UMTX_OP_SHM` reachability is an open question, directly relevant to the kernel candidates in [KERNEL_AUDIT.md](KERNEL_AUDIT.md).
 
 ## Stage 4: Kernel Read/Write
 
@@ -93,7 +93,7 @@ See [KERNEL_AUDIT.md](KERNEL_AUDIT.md) for the full audit.
 
 - **CVE-2026-7270 (execve memmove OOB):** Tier 1. Full exploit published. FreeBSD 11+ confirmed.
 - **CVE-2026-45251 (poll/select UAF):** Tier 1. Full exploit published. All supported FreeBSD versions.
-- **CVE-2024-43102 (UMTX UAF, CVSS 10):** Tier 1. Exploited on older PS5 firmware (1.00-7.61). Likely patched on 14.10.
+- **CVE-2024-43102 (UMTX UAF, CVSS 10):** Tier 1. Exploited on older PS5 firmware (1.00-7.61). Patch status on 14.10 is open: `_umtx_op` (454) is alive, but `UMTX_OP_SHM` was never exercised there — the earlier "umtx" tests hit syscall 557 ([ZigZagBoi1 PR #41](https://github.com/ZigZagBoi1/PS5-14.10-Research/pull/41)).
 
 ## Stage 5: Post-Exploitation
 
