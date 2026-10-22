@@ -37,6 +37,19 @@ All probes tested on PS5 14.10. Results from device beacon logs.
 | p160 | Relapse CVE test | All patched |
 | p161 | Fast gradient | Crash |
 | p162 | Deep scan to 2000 bytes | Partial data |
+| p164 | DataView cell corruption (view = target) | PREPARED — NOT RUN |
+| p165 | Float64Array cell corruption (m_vector / m_length) | PREPARED — NOT RUN |
+
+### p164/p165: View-Cell Extraction (issue #5 roadmap, prepared)
+
+Both reuse the proven p156 bait-and-switch groom unchanged (20 baits, worker targets, free + 30 GC rounds, 146MB blob, 38,348,816 calls) and flip the target class from JSString to typed-array views. p157 established that backing stores are NOT overwritten (zeros came back); these probes bet on the CELL — the region p156 proves the sweep rewrites.
+
+| Probe | Targets | Reads | Classification |
+|-------|---------|-------|----------------|
+| p164 | 8 canary strings + 12 small DataViews (16B AB) + 4 marge DataViews (102,400B AB) | byteLength, byteOffset, 16 raw bytes via getUint32 (try/catch each) | PRE-OK / VECTOR-HIT / LEN-HIT / DEAD |
+| p165 | 8 canary strings + 16 small Float64Arrays + 4 marge Float64Arrays | length, byteLength, byteOffset, raw bits of f64[0]/f64[1] via clean bitcast buffer | PRE-OK / VECTOR-HIT / LEN-HIT / DEAD |
+
+Interpretation guide: VECTOR-HIT with non-fill bytes = a read through a sweep-written pointer (module-relative leak candidate — the WebKit base defeat); LEN-HIT with successful high-index reads = OOB read past the backing store. Canary `.length` beacons give the p156 baseline (81400) for cross-console comparison. Both probes are memory-neutral vs p156 (+~30 small objects), so the second-console ceiling (~1.28-1.92GB, issue #6) is respected.
 
 ### Sweep Survival (probes/sweep-survival/)
 

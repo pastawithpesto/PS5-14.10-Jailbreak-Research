@@ -63,7 +63,10 @@ See [ATTACK_SURFACE.md](ATTACK_SURFACE.md) for the full list.
 
 ## Stage 2: Arbitrary Read/Write Primitive
 
-This stage has not been reached. It depends on confirming the CVE-2026-43715 crash on device.
+This stage has not been reached. Two independent tracks:
+
+1. **CVE-2026-43715 crash confirmation** (primary track) — see above.
+2. **MetadataTable view-cell extraction** (issue #5 roadmap, length-window audit path 2) — probes `p164-dataview-extract.js` and `p165-f64vector.js` (PREPARED) place DataView/Float64Array cells in the proven p156 groom. If the sweep overwrites a view's `m_vector`, reads through the surviving view fetch raw bytes from wherever the written value points (LLInt code pointer → module-relative leak); if `m_length`/`byteLength` is overwritten larger, indexed reads run past the backing store. p157 showed backing stores themselves are not overwritten — the cell is the target.
 
 The PS5 exploitation environment is highly favorable for this stage. See [EXPLOITATION_ENVIRONMENT.md](EXPLOITATION_ENVIRONMENT.md) for full details. The key properties:
 
