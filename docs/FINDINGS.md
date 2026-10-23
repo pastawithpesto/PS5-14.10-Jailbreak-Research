@@ -2,6 +2,67 @@
 
 All findings are validated on device (PS5 14.10) or verified against WebKit-1200 source.
 
+## 2026-10-23 Canvas getImageData + CSS/SVG filters CLOSED
+
+Empty `getImageData`/`createImageData` `zeroFill()`. `FilterImage` has no IDL; copy path zero-fills. Not a pointer leak. `docs/C2D_FILTER_READBACK_2026-10-23.md`.
+
+## 2026-10-23 TimeRanges / 24 B path CLOSED
+
+Header layout: `TimeRanges` ≈ 32 B (RefCounted + Vector), not 24 B. `MediaTime` 16 B embedded; `toDouble()` converts, does not bitcast a pointer. `buffered`/`seekable` create or copy via `Ref`. No raw `TimeRanges*` UAF in WK-1400. Details: `docs/TIMERANGES_24B_AUDIT_2026-10-23.md`.
+
+## 2026-10-23 V679 lineDash 96 after free — same PREWRITE crash
+
+Device: DONORS=80, DASH 96, CANVSPRAY=300, PREWRITE, no POSTWRITE (Sony memory dialog). Same signature as V676-B / V677. V578/V678 with zero intervening index-48 allocs still ALIAS idx=10. Stale `lineWidth` store cannot tell Vector/StringImpl occupancy from page-return-to-OS. Occupancy vehicle stays source-only. Do not Circle more occupancy probes on this oracle.
+
+## 2026-10-23 V676/V677 string interpose CLOSED as occupancy oracle
+
+V678 control (no strings) ALIAS idx=10, POSTWRITE ok, END healthy. Guide not toasted.
+V676 arm A same. V676 B (`repeat(744)` then 300 canvas) and V677 (`repeat(700)` then 300 canvas) both die at PREWRITE with Sony "not enough free system memory". 700 is index 46, not 48, so the crash is slot eviction: any StringImpl spray between free and Canvas2D reclaim returns the 768-class page; later canvas spray is a new span; stale write is unmapped. StringImpl-744 occupancy is not distinguishable with this oracle. Next: V679 lineDash 96-double FastMalloc buffer as the first index-48 alloc after free (pre-created donors, then setLineDash, then canvas spray).
+
+## 2026-10-23 DASHFORGE 0x1800000 retracted
+
+No local getLineDash at 0x1800000. Source: cobrajet302gt issue #11 comment 6356111570, third-party harness. V573 = typed alias only. Blockers: native address disclosure AND raw Vector-header write. No V674.
+
+## 2026-10-23 V673 navigator.language CLOSED
+
+Guide dumps (multiple loads 19:17–19:18): `navigator.language` = `en-US`, JS length 5, UTF-16 `0065 006e 002d 0055 0053`, BCP47 ASCII, over15=false. `navigator.languages` n=1 same string. `navigator.userAgent` length 116 well-formed `Mozilla/5.0 (PlayStation; PlayStation 5/14.10) AppleWebKit/605.1.15 ...`. No cross-load variation. SYSTEM_LANGUAGE is a short OS locale; truncation/fromLatin1-off-stack does not fire. Path CLOSED.
+
+## 2026-10-23 V672 password-input-changed-type CLOSED
+
+Sony clone on the main document (no iframe). Two+ fresh loads with PRE-P2T/POST-P2T (type=text, focus held), PRE-T2P/POST-T2P (type=password), SURVIVE 50/250/1000/3000, DONE. First complete spec runs 19:12:25 and 19:12:34. Close entire secure-input family from Guide JS. Do not combine type-flip with teardown.
+
+## 2026-10-23 V671 removed-password-input CLOSED
+
+Phase 1 REACH: password in iframe, focus held two rAF, selectionStart/End=0.
+Phase 2 remove focused input: PRE/POST-REMOVE, SURVIVE 50/250/1000/3000.
+Phase 3 iframe about:blank then remove: PRE-NAV, NAV-LOAD, PRE/POST-REMOVE, full SURVIVE, DONE 19:09:44. Green box was debug iframe border. Close secure-input remove-password lifetime path from Guide JS. Type-change variant not run (Daybreak: later).
+
+## 2026-10-23 V670 validation detached iframe CLOSED
+
+Phase 1 REACH: reportValidity=false, invalid event, focus=required_text_input, tree alive 500ms. SSL was form GET to self-signed host (preventDefault after).
+Phase 2 remove-outer: PRE/POST-DETACH + SURVIVE 50/250/1000/3000.
+Phase 3 about:blank (cb=670004): two+ fresh loads 19:02:30, 19:03:33, 19:03:41 with REACH, PRE-NAV, NAV-LOAD, PRE-REMOVE, POST-REMOVE, full SURVIVE, DONE. No missing post-phase. Close validation detached-frame lifetime path from Guide JS. No more timing variants.
+
+## 2026-10-23 V668 Sony remove-reinsert (AcceleratedSurface-from-Guide closed)
+
+V573 kept off this page. Sony DOM + composited-subframe.html. Phases CREATE/FIRST-FRAME/COMPOSITE/REMOVE/REINSERT/BLANK/TEARDOWN/SURVIVE-250/1000/3000 all present, DONE v668-survive, no crash. JS cannot call `uiController.removeViewFromWindow`. Daybreak: close AcceleratedSurface-from-Guide. Next pick is `MediaPlayerPrivatePlayStation::performTaskAtMediaTime` (V669).
+
+## 2026-10-23 V667 main-document compositing toggle
+
+Negative. V573 control idx=10. Full-viewport `translate3d` overlay on the Guide document, 6 rAF, remove overlay. PRE-KILL/POST-KILL/SURVIVE. JS teardown of composited layers does not destroy `AcceleratedSurfacePlayStation` before `finish()` returns. Subframe and main-overlay paths are closed for this lifetime bug.
+
+## 2026-10-23 V666 nested blob WebPage
+
+Negative. V573 control idx=5. Blob iframe with child rAF+canvas, kill at tick 8. 77+ DONE survive. Subframe teardown does not race `AcceleratedSurfacePlayStation`.
+
+## 2026-10-23 V665 kill-on-frame-2
+
+Negative. Same V573 control (idx=6). Twelve iframes, `about:blank` + remove at tick 2. PRE-KILL then POST-KILL then SURVIVE (21+ DONE). CSS 3d iframes are not racing the detached `didRenderFrame` thread.
+
+## 2026-10-23 V664 AcceleratedSurfacePlayStation iframe kill
+
+Negative crash. V573 control on the same page: ALIAS idx=10 write=true, 15+ clean runs. Eight CSS translate3d iframes, 16 rAF ticks, remove(): PRE-KILL then POST-KILL then SURVIVE. The detached `didRenderFrame` thread did not die on this teardown. Either Guide never created the PS surface for those iframes, or `finish()` completed first.
+
 ## Confirmed Bugs
 
 ### 1. MetadataTable Integer Overflow (Bug 317632 / CVE-2026-64784)
@@ -153,3 +214,7 @@ This reads from adjacent heap allocations. A 48-bit x86-64 pointer is exactly re
 5. Read JSGlobalObject vtable → binary base → ROP gadgets
 6. Vtable hijack → ROP chain (x86-64, no PAC, no JIT)
 7. Kernel escalation via reachable syscall surface
+
+### Pointer-width / union-arm IDL getter map (2026-10-23)
+
+Source-only sweep of 616.1.27 WebCore/JSC for Guide-reachable **getters** returning JS Number/String over pointer-width or union-arm backing. Full table + greps in `docs/IDL_POINTER_WIDTH_GETTERS_2026-10-23.md`. Result: only two qualify, both tag-flip sinks (not standalone leaks): `DeprecatedCSSOMPrimitiveValue.getStringValue()/cssText()` over `CSSPrimitiveValue::m_value` (StringImpl*/calc/unresolvedColor arms), and `TimeRanges.start()/end()` over `MediaTime::m_timeValue` (int64 arm). No clean IDL getter returns a native pointer without a prior type confusion.

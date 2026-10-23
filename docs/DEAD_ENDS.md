@@ -288,6 +288,10 @@ Butterfly overlap, StructureID confusion, JSFunction pointer leak, structured cl
 
 Blob segment gap, Worker Float64Array, Fetch response body, XHR response ArrayBuffer — all tested on device (V641). Every path returns zeros. The DontInitialize codepath may not be reachable or the kernel zero-fills the backing pages.
 
+### Legacy ImageData Transfer + History Leak — DEAD: Zero on Device
+
+V661 reproduced the historical `ImageData → postMessage(..., [data.buffer]) → history.state.data.buffer` disclosure shape. The transfer detached the original buffer, and both `replaceState` and `pushState` recreated a 65,536-byte `Uint8ClampedArray`, but every byte was zero (`nz=0`) and no canonical pointer candidates existed.
+
 ### libpas CVE-2025-43531 Race — DEAD: Zero-Init Blocks Leak
 
 libpas confirmed on PS5 (BPLATFORM(PLAYSTATION) at BPlatform.h:341). The bmalloc/libpas race condition is theoretically present but zero-init on allocation destroys any stale data that survives the race window.
@@ -299,6 +303,36 @@ MediaSource.buffered returns a TimeRanges object. Heap layout manipulation via a
 ### Canvas Backing Store Uninit — DEAD: tryFastCalloc
 
 Canvas backing store uses tryFastCalloc (calloc = zero-init). Even if freed backing store memory contains pointers, reclaiming it with a new canvas zeros it. getImageData always returns zero-initialized pixel data.
+
+### Truncated PNG Pixel Disclosure — DEAD: Decoder Draws Nothing
+
+V662 tested three malformed/truncated IDAT shapes at 64x64 and 128x64 through both `HTMLImageElement` and `createImageBitmap`, after same-sized heap poisoning. The images report load success, but `drawImage` leaves every prefilled destination pixel untouched: 4,096/4,096 or 8,192/8,192 unchanged, with zero unknown pixels across three device runs. The earlier `PNG-TRUNC-OK` result is permissive load completion, not an uninitialized-pixel disclosure.
+
+### CurlTMServiceRequest URL Over-read — UNREACHABLE in Guide
+
+V663 exercised 42 iframe navigations covering URL canonicalization differences and payload lengths around allocator boundaries from 31 through 1,025 bytes. Every intended request reached the host once with the expected normalized path; there was no internal 302, garbage suffix, crash, or extra request. Although the 14.00 source passes the length-delimited `evalURL` to C-string consumers, the required `WebSecurity` traffic-manager evaluation path is not active/reachable in this Guide session. Do not revisit without first proving `WebSecurity::activatedStatus()` and a non-null `convertUrl()` result.
+
+### V650/V655 Constant-address DASHFORGE — INVALID PREMISE on This Console
+
+Those pages write a forged `m_stateStack.m_buffer` through sprayed 768-byte ArrayBuffers. Device results later proved that ArrayBuffer storage does not reclaim the Canvas2D object slot on this build; only same-type live Canvas2D objects do. V573 exposes typed Canvas properties, not raw header bytes.
+
+`0x1800000..0x18002d0` as "readable/stable zero" is **not** a local result. It came from cobrajet302gt in GitHub issue #11 comment 6356111570 (2026-10-23 02:42Z), describing their separate AB-backed vehicle. On this console that AB(768) path hard-died; the comment is not transferable proof. Immediate blockers are **both** native address disclosure **and** a raw Canvas Vector-header write. A pointer alone does not activate DASHFORGE here. No V674, no scan.
+
+### FastMalloc occupancy via StringImpl 744 / lineDash 96 — DEAD: write oracle cannot tell occupant from unmapped
+
+libpas 16-byte classes: Canvas2D object is 768 B (index 48). Source fit: Latin-1 `StringImpl` length 744 (24+744) and `Vector<double>` of 96 (`setLineDash`). Device: V678 control with **no** extra allocs still ALIAS idx=10. Any intervening index-48 (or even index-46 `repeat(700)`) alloc then canvas spray then stale `lineWidth` store dies with Sony "not enough free system memory" and no POSTWRITE. Same dialog as dangling write. Crash ≠ occupancy. Do not Circle occupancy probes on this oracle.
+
+### TimeRanges / 24 B MediaTime tag-flip — DEAD: wrong size class, no UAF
+
+`TimeRanges` is RefCounted + `PlatformTimeRanges` (a `Vector`) ≈ 32 B, not 24 B. `MediaTime` (16 B union) is embedded in Vector elements. `start()`/`end()` go through `toDouble()`. `buffered`/`seekable`/`played` `create` or `copy` via `RefPtr`. No raw `TimeRanges*` UAF in WK-1400. See `docs/TIMERANGES_24B_AUDIT_2026-10-23.md`.
+
+### IDL pointer-width getters as standalone leak — DEAD: need a tag flip we cannot write
+
+`DeprecatedCSSOMPrimitiveValue.cssText` / `getStringValue` and `TimeRanges.start` only leak if the union/flag is already wrong. Occupancy write that would flip CSS is the oracle that crashes. BigInt / TypedArray `.length` are JSC MarkedSpace/Gigacage, not the Canvas2D FastMalloc span. See `docs/IDL_POINTER_WIDTH_GETTERS_2026-10-23.md`.
+
+### Canvas getImageData / CSS-SVG filter paint — DEAD: zeroFill, no IDL
+
+`createImageData` / empty `getImageData` call `initializeEmptyImageData` → `zeroFill()`. `FilterImage` is not ScriptWrappable; `copyPixelBuffer` zero-fills. See `docs/C2D_FILTER_READBACK_2026-10-23.md`.
 
 ---
 
