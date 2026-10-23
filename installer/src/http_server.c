@@ -139,6 +139,15 @@ enum MHD_Result http_on_request(void *cls, struct MHD_Connection *conn,
             unsigned char *decompressed = NULL;
 
             if (entry->compressed) {
+                if (entry->orig_size > WKRLI_MAX_DECOMPRESSED_SIZE) {
+                    const char *too_large = "500 Decompressed Size Too Large\n";
+                    resp = MHD_create_response_from_buffer(strlen(too_large), (void *)too_large, MHD_RESPMEM_PERSISTENT);
+                    MHD_add_response_header(resp, "Content-Type", "text/plain");
+                    add_cors_headers(resp);
+                    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, resp);
+                    MHD_destroy_response(resp);
+                    return ret;
+                }
                 decompressed = malloc(entry->orig_size + 1);
                 if (!decompressed) {
                     const char *oom = "503 Out of Memory\n";
