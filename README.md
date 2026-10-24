@@ -115,7 +115,7 @@ Security research targeting the PS5 WebKit browser on firmware **14.10**. This f
 |----------|-------|
 | Firmware | 14.10 |
 | WebKit JIT | Disabled (interpreter only) |
-| Gigacage | **Disabled** — typed array backing stores share the primary FastMalloc heap |
+| Gigacage | **Disabled**, but typed-array backing stores do not reclaim the 768-byte Canvas2D slot on the tested Guide build |
 | IsoHeap | **Disabled** — `WTF_MAKE_ISO_ALLOCATED` compiles to standard `FastMalloc` |
 | ASLR | Enabled (24-bit user / 16-bit kernel entropy) |
 | libpas | Present (`BPLATFORM(PLAYSTATION)` in `BPlatform.h`) — sparse page commit model |
@@ -128,21 +128,21 @@ Security research targeting the PS5 WebKit browser on firmware **14.10**. This f
 
 Analysis of [CVE-2026-43720](https://www.cve.org/CVERecord?id=CVE-2026-43720), a canvas rendering context lifecycle issue in `HTMLCanvasElement::getContext()`. The reentrant path through `bitmaprenderer` → property getter → `2d` creates a window where the inner context reference outlives its expected scope. Research probes confirm:
 
-- The freed 768-byte `CanvasRenderingContext2D` slot can be reclaimed by a same-size `ArrayBuffer` spray
+- The freed 768-byte `CanvasRenderingContext2D` slot can be reclaimed by a same-type live Canvas2D allocation; same-size `ArrayBuffer` sprays do not reclaim it on the tested Guide build
 - The aliased context supports bidirectional read/write through standard Canvas2D APIs (`lineWidth`, `miterLimit`, `setLineDash`, `getLineDash`, `globalAlpha`, etc.)
-- Full 12-API capability pass confirmed on device (V562)
-- `sizeof(State) = 400`, with key fields mapped: `m_stateStack` at +112, `lineWidth` at +48, `miterLimit` at +64, `lineDash` Vector at +168
+- Full 12-API capability pass confirmed on device (V630)
+- The alias reaches typed Canvas state fields, but it does not expose raw `State` or `Vector` header bytes
 
 ### Heap Memory Mapping
 
-A binary subdivision scanner (V655) maps the WebContent process address space by probing whether target pages are resident. The algorithm tests the start, end, and midpoint of a range first, then fills in quarter-points, eighth-points, and so on — achieving ~187KB resolution across a 24MB search space in ~129 probes.
+The historical V650–V655 scanner assumed that a 768-byte ArrayBuffer could replace the Canvas2D object and forge its Vector header. Later device results disproved that premise on this console. It did not produce a validated address-space map and must not be treated as an ASLR disclosure.
 
 Key memory layout findings (informed by VM map data — see acknowledgments):
 
 - **SceLibcHeap** spans at least two VA ranges in the process map
 - The heap uses a sparse commit model: large PROT_NONE reservations with individual pages committed via MAP_FIXED on demand
-- Freed blocks remain mapped (no `MADV_FREE` / page decommit), and release assertions are disabled
-- ArrayBuffer backing stores, JSC objects, and WebCore DOM objects all share the same FastMalloc heap due to Gigacage and IsoHeap being off
+- Freed Canvas2D/state blocks can become unreadable or decommitted immediately; a bare stale read dies even without an intervening allocation
+- Gigacage and IsoHeap being disabled does not imply that ArrayBuffer storage competes for every WebCore object size class; Canvas2D reclaim is same-type on this build
 
 ### Probe History
 
@@ -152,7 +152,7 @@ Iterative research probes (V569–V655) cover:
 - **V574–V589**: API surface exploration, capability mapping, and JSC feature testing
 - **V590–V601**: State struct layout analysis, Vector growth behavior, gradient/pattern operations
 - **V610–V643**: Address scanning strategies (linear, stride, targeted)
-- **V650–V655**: Crash oracle and binary subdivision scanner for heap topology mapping
+- **V650–V655**: Historical crash-oracle/scanner experiments; later invalidated because their ArrayBuffer-reclaim premise does not hold on this console
 
 ### Acknowledgments
 

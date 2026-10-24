@@ -8,7 +8,7 @@ Real memory safety bugs confirmed on device. Each hit a secondary wall that prev
 
 ## 1. CVE-2026-43720 — Canvas getContext() Reentrant UAF
 
-**Status:** CONFIRMED on device — IsoHeap OFF on PS5, same-type reclaim + R/W WORKING
+**Status:** CONFIRMED on device — IsoHeap OFF on PS5; same-type reclaim gives a typed Canvas-state alias, not arbitrary R/W
 
 **Bug:** `HTMLCanvasElement::getContext()` checks `m_context` at line 226, then calls `convert<IDLDictionary>()` at line 268 for settings. Dictionary conversion invokes JS property getters. A getter re-enters `getContext('2d')` on the same canvas — inner call creates context, outer call overwrites `m_context` via `unique_ptr` assignment, freeing the inner context while its JS wrapper survives.
 
@@ -28,9 +28,8 @@ The bitmaprenderer outer avoids same-size-class reuse (80B vs 768B) that kills t
 
 **Device evidence:**
 - V460/V461: Re-entry confirmed, same-type R/W confirmed
-- V527/V527b (cobra PR#13): AB reclaim of 768B slot, lineWidth=9999.99 readback
+- V527/V527b (cobra PR#13): historical AB-reclaim interpretation; superseded by later same-type alias scans and AB class sweeps
 - V548-V550: Alias CONFIRMED, full state R/W via aliased pair
-- V562: ALL 12 Canvas2D APIs work through alias — clean complete run
 - V573: Full same-type reclaim + bidirectional R/W on PS5 14.10
 - V589: BMR trigger confirmed working (`uaf-ok: inner=OK`)
 - V630: Comprehensive alias diagnostic — ALL 12 Canvas2D APIs confirmed working through alias:
@@ -45,21 +44,21 @@ The bitmaprenderer outer avoids same-size-class reuse (80B vs 768B) that kills t
 - V632: Two-stage test (alias + zero-alloc freed reads) — Stage 1 alias confirmed
 - V641: Blob/Worker/Fetch transfer race tests — all DontInitialize paths return zeros
 
-**IsoHeap is OFF on PS5.** `WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc on FreeBSD/PlayStation. Gigacage also disabled — AB backing stores share the same heap as JSC/WebCore objects. Confirmed by Synacktiv writeup + BPlatform.h:341 `BPLATFORM(PLAYSTATION)`.
+**IsoHeap is OFF on PS5.** `WTF_MAKE_ISO_ALLOCATED` compiles to standard FastMalloc on FreeBSD/PlayStation. Gigacage is also disabled, but this does **not** make ArrayBuffer backing stores interchangeable with the 768-byte Canvas2D object slot. Device results confirm same-type Canvas2D reclaim and reject the historical AB-reclaim premise.
 
 **Confirmed primitives:**
-1. Same-type Canvas2D reclaim: 500x canvas spray reclaims freed 768B slot
+1. Same-type Canvas2D reclaim: a live Canvas2D spray reclaims the freed 768B slot
 2. Bidirectional R/W: lineWidth, miterLimit, globalAlpha, fillStyle, getTransform, getLineDash all work through stale wrapper
-3. State buffer reclaim: 8 saves → 6400B out-of-line buffer, AB spray can reclaim
+3. State-buffer growth is observable, but ArrayBuffer reclaim/readback of the freed buffer is not confirmed; bare stale reads die and AB-backed attempts did not yield bytes
 
-**Info leak candidate (OOB state stack read):**
-Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + same-type reclaim, new ctx has 0 saves (`m_size=1`). Stale wrapper reads `m_stateStack.last()` using stale `m_size=9` → `buffer[8]` = offset 3200 = 2800 bytes past end of 1-State buffer. Reads adjacent heap allocations as float64. 48-bit x86-64 pointer is exactly representable as float64. libpas uses out-of-band bitmap tracking — freed chunks retain all stale data, not zeroed.
+**Retracted info leak candidate (OOB state stack read):**
+The stale wrapper stores only the native `CanvasRenderingContext2D*`; it does not cache a separate `m_stateStack.m_size`. Both the vector header and its size live inside the reclaimed C++ object. A same-type reclaim constructs a new vector with `m_size=1`, so the stale wrapper sees the new size, not the old inner context's `m_size=9`. The previously documented `buffer[8]` read cannot arise from same-type reclaim alone.
 
-**Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values — no path found to read a raw heap pointer. 10 dedicated info leak paths exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Freed memory reads crash (destructor nulls m_stateStack.m_buffer). AB reclaim zeros data. DontInitialize AB paths return zeros on device. Community help wanted on the info leak primitive.
+**Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values — no path found to read a raw heap pointer. Dedicated info leak paths are exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Bare freed-memory reads crash, ArrayBuffer storage does not reclaim the Canvas2D slot, and the tested `DontInitialize` paths return zeros on device. V661 also confirmed that the legacy `ImageData` transfer plus `history.state` leak returns a fully zeroed 65,536-byte buffer on PS5 14.10 in both `replaceState` and `pushState` variants.
 
 **Exploitation chain once info leak is solved:** fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.
 
-**Fix:** Commit 2693828e8d73 (2026-06-29): re-checks `m_context` after dictionary conversion. Not present in WK-1400.
+**Fix:** Commit `040ef6e21ffa` (2026-06-29, WebKit bug 313175): re-checks `m_context` after dictionary conversion. Not present in WK-1400.
 
 ---
 
@@ -96,7 +95,7 @@ Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + sam
 
 **Object substitution (V432):** Replace branch2 with any JSObject → `fromObject()` wraps it as a real ReadableStream (`instanceof` = true). `.locked` returns false, `.getReader()` throws.
 
-**OOB read (V430/V432):** Return only 1 element from iterator → `results[1]` reads 8 bytes past Vector allocation. ASSERT compiled out on PS5. Crashes on ungroomed heap.
+**Short-result crash (V430/V432), not a stale-byte read:** returning one iterator element reaches the missing second result, but teardown clears the Strong slots and the checked Vector access terminates. Later source/device analysis attributes the crash to null/bounds failure, not an observable 8-byte heap disclosure.
 
 **Device evidence (V432):**
 - Plain object wrapped as ReadableStream: confirmed
@@ -167,7 +166,7 @@ Clipboard API is absent on PS5 14.10 (`navigator.clipboard` undefined despite `i
 
 | Vuln | Bug Class | Wall | Status |
 |------|-----------|------|--------|
-| CVE-2026-43720 Canvas | UAF | ~~IsoHeap~~ OFF | **R/W CONFIRMED**, info leak candidate found |
+| CVE-2026-43720 Canvas | UAF | ~~IsoHeap~~ OFF | Typed Canvas-state alias confirmed; no native disclosure or arbitrary R/W |
 | CVE-2026-43715 CSSFontFace | UAF write | Timer RELEASE_ASSERT | DoS-only, sole 192B occupant |
 | tee() type confusion | Type confusion | JS builtin dispatch | Contained |
 | Private-name inversion | Slot injection | JS builtin dispatch | Contained |
@@ -175,4 +174,4 @@ Clipboard API is absent on PS5 14.10 (`navigator.clipboard` undefined despite `i
 | HTMLParser CE | Double-parent | Post-construction validation | Microtask bypass untested |
 | CVE-2026-43727 Clipboard | Iterator UAF | Missing API | Dead (no Clipboard API) |
 
-**CVE-2026-43720 is the primary exploitation vector.** IsoHeap is OFF on PS5 — same-type reclaim gives full R/W. The OOB state stack read via save-count mismatch is a strong info leak candidate. Once a heap address is confirmed, the chain is: fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.
+**CVE-2026-43720 remains the primary exploitation vector.** IsoHeap is OFF on PS5 and same-type reclaim gives typed Canvas state R/W. A separate disclosure or a second corruption that exposes raw bytes is still required before the chain can become: fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.

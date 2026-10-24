@@ -16,13 +16,21 @@ Stage 5: Post-exploitation (SMAP bypass via GPU DMA)
 
 The goal of this stage is to trigger a use-after-free or type confusion in WebKit that gives the attacker controlled access to freed or confused C++ object memory.
 
-### Best Lead: CVE-2026-43715 (CSSFontFace UAF)
+### Best Lead: CVE-2026-43720 (Canvas getContext UAF)
 
-A use-after-free in `iterateClients()` triggered by a thenable getter on `FontFace.prototype.then`. The getter runs synchronous JavaScript during callback iteration, removes a style element, and forces a layout update. This disconnects a client mid-iteration. The next callback hits the disconnected object.
+Re-entrant `getContext()` invalidates the inner Canvas2D context while its JS wrapper survives. Same-type live Canvas2D allocation reliably reclaims the 768-byte slot, producing two wrappers over one native context and typed bidirectional state-field access.
 
-This is the strongest lead because it is a real C++ UAF with synchronous JavaScript re-entry. It is not blocked by the JS builtin wall that limits the stream-based bugs. Patched upstream, unpatched on PS5 14.10. Device test deployed, awaiting crash confirmation.
+This is not arbitrary read/write. All exposed Canvas APIs return typed values; ArrayBuffer storage does not reclaim the object slot, and no raw Vector-header write has been demonstrated. The next required result is either a native-byte disclosure through an integer-preserving JS buffer/String or an independent corruption that can write a pointer/Vector header.
 
-See [bugs/cssfontface-uaf.md](bugs/cssfontface-uaf.md).
+See `CONFIRMED_VULNS.md` section 1 and `DEAD_ENDS.md` "Info Leak Paths".
+
+### Closed lead: CVE-2026-43715 (CSSFontFace UAF)
+
+The CSSFontFace lifetime bug is real, but current device/source evidence limits
+it to a synchronous fixed enum write followed by the Timer thread
+`RELEASE_ASSERT`. Same-type grooming produces no useful secondary corruption;
+other allocation families do not provide a viable 192-byte target. Keep it as
+a DoS finding, not the Stage-2 plan.
 
 ### Novel Findings (no CVE assigned)
 
@@ -63,16 +71,16 @@ See [ATTACK_SURFACE.md](ATTACK_SURFACE.md) for the full list.
 
 ## Stage 2: Arbitrary Read/Write Primitive
 
-This stage has not been reached. It depends on confirming the CVE-2026-43715 crash on device.
+This stage has not been reached. The Canvas UAF supplies a typed state-field alias, but Stage 2 still needs a native-byte disclosure and an independent raw pointer/header write.
 
 The PS5 exploitation environment is highly favorable for this stage. See [EXPLOITATION_ENVIRONMENT.md](EXPLOITATION_ENVIRONMENT.md) for full details. The key properties:
 
-- **Gigacage is disabled.** ArrayBuffer backing stores share the same FastMalloc heap as JSC objects. No address space isolation.
+- **Gigacage is disabled, but allocation domains still matter.** This removes one isolation layer; it does not make ArrayBuffer storage interchangeable with every WebCore object slot. In particular, 768-byte ArrayBuffers do not reclaim the Canvas2D slot on the tested Guide build.
 - **StructureID has no runtime validation.** A corrupted cell header maps to an arbitrary Structure pointer within 128MB, producing type confusion with no runtime check.
 - **Security assertions are compiled out.** `ASSERT_WITH_SECURITY_IMPLICATION` is a no-op on PS5 release builds.
-- **Freed blocks stay mapped.** Heap grooming can replace freed objects with attacker-controlled data.
+- **Freed-block persistence is size/build dependent.** On the tested 14.10 Guide, a bare stale Canvas2D read dies and ArrayBuffer storage does not reclaim its 768-byte slot. Only same-type live Canvas2D reclaim is confirmed.
 
-The planned path: UAF on CSSFontSelector or CSSSegmentedFontFace, heap grooming to replace the freed object with an ArrayBuffer backing store (same heap, same size class), corrupt the StructureID in a JSCell header, trigger type confusion, and build `addrof` and `fakeobj` primitives. A fake JSArray with a controlled butterfly pointer provides arbitrary read/write.
+The earlier ArrayBuffer-replacement plan is not supported by current device evidence. Stage 2 still requires an independent native-byte disclosure and an independent raw pointer/Vector-header write; the Canvas alias currently exposes typed state fields only.
 
 ## Stage 3: Sandbox Escape
 

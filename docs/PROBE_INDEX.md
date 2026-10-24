@@ -126,21 +126,21 @@ All probes tested on PS5 14.10. Results from device beacon logs.
 
 | Probe | Purpose | Device Result |
 |-------|---------|---------------|
-| v527 | AB reclaim discriminator (cobra PR#13) | lineWidth=9999.99 → AB RECLAIMED |
+| v527 | Historical AB reclaim discriminator (cobra PR#13) | **SUPERSEDED:** later same-type alias scans and AB class sweeps show AB storage does not reclaim the 768B Canvas2D slot on this build; the old marker was not a validated AB owner |
 | v527b | Ref-pin bypass: canvas lever + AB reclaim | LEVER: reset=no-reset, type=no-type-attr, width=ok |
 | v571 | lineWidth diagnostic | Offset calibration |
 | v573 | Same-type reclaim diagnostic | CONFIRMED: bidirectional R/W, idx=9 |
 | v578 | Light spray diagnostic | Spray count confirmed |
 | v580 | Info leak capability probe | AudioContext=NO, IDB=NO, Workers=YES, WS=YES |
 | v583 | JSC capability test | BigInt+DV=YES, MC+xfer=YES, class/super=YES |
-| v585 | AB↔Context cross-type reclaim | trigger+spray beacons received |
+| v585 | AB↔Context cross-type reclaim | Trigger/spray reached; no validated cross-type owner. Later device work closed AB(768) reclaim |
 | v587 | State buffer reclaim (Proxy trigger) | CRASHED: size mismatch + GC during spray |
 | v588 | Relapse scope leak test | Scope leak DEAD, structured clone+MC WORKS |
 | v589 | State buffer reclaim (BMR trigger) | uaf-ok: inner=OK, CRASHED during spray |
 | v592 | Butterfly harvest zero-alloc pre-read | Deployed by peer session |
 | v594 | BMR trigger diagnostic | Ready, not yet tested |
 | v597 | CSS filter uninit + stale heap | Ready, not yet tested |
-| v600 | Save-count mismatch OOB read | Deployed |
+| v600 | Save-count mismatch OOB read | **RETRACTED:** both wrappers read the reclaimed object's one shared Vector header; no stale `m_size=9` survives same-type reclaim |
 | v601 | State buffer heap scan | Deployed |
 | v610 | Cross-context getContext UAF (2d→WebGL→2d) | WebGL absent — DEAD |
 | v611 | IntersectionObserver UAF probe | Narrow window, DEAD |
@@ -159,6 +159,25 @@ All probes tested on PS5 14.10. Results from device beacon logs.
 | v641 | Blob/Worker/Fetch DontInitialize race | ALL return zeros |
 | v642 | WebSocket TLS probe | Deployed |
 | v643 | Heap groom timing diagnostic | Deployed |
+
+### Later 14.10 Guide closure probes (2026-10-23/24)
+
+| Probe | Purpose | Device Result |
+|-------|---------|---------------|
+| v661 | Legacy ImageData transfer/history disclosure | 65,536-byte result fully zeroed in both history variants |
+| v663 | PlayStation CurlTM URL over-read reachability | 42/42 requests exact; traffic-manager path inactive/unreachable |
+| v664–v668 | AcceleratedSurface teardown variants | All survived; harness-only `removeViewFromWindow` unavailable |
+| v669 | Media timed-callback reachability | Direct media rejected before network; callback never armed |
+| v670–v672 | Validation/password-input teardown and type changes | Full phase brackets survived; family closed |
+| v673 | `navigator.language` stack-buffer read | Stable `en-US`, length 5; no truncation or over-read |
+| v676–v679 | StringImpl/lineDash occupancy | Ambiguous Sony OOM/page-loss before post-write; wrong-class control also dies. Do not use as occupancy proof |
+| v681/v686 | Font hmtx/metrics disclosure | Semantic/in-file widths only; `0xCC` padding does not change output |
+| v683 | Stored-PNG length overshoot with valid control | Valid arm paints; overshoot arm paints no payload or heap bytes |
+| v684 | Pointer-bit representation fingerprint | Integer views preserve bits; Float64/Canvas Number path DAZ-flushes to zero |
+| v688–v690 | RAB detach/shrink/grow sinks | Detach clean; stale views empty/error; grow and regrow tails zeroed |
+| v691–v693 | Worker/transport/stream/API battery | Transfers exact; no extra bytes; unavailable APIs recorded |
+| v695–v699 | MSE and media decoder paths | Normal AB works; RAB rejected; truncation/padding does not expose leftover pixels |
+| v700–v702 | SVG/ImageData/bitmaprenderer/DOM lifetime battery | Initialized/exact results only; FinalizationRegistry did not collect under safe pressure |
 
 ## Relapse Probes (probes/relapse-test/)
 
