@@ -12,12 +12,12 @@ Header layout: `TimeRanges` ≈ 32 B (RefCounted + Vector), not 24 B. `MediaTime
 
 ## 2026-10-23 V679 lineDash 96 after free — same PREWRITE crash
 
-Device: DONORS=80, DASH 96, CANVSPRAY=300, PREWRITE, no POSTWRITE (Sony memory dialog). Same signature as V676-B / V677. V578/V678 with zero intervening index-48 allocs still ALIAS idx=10. Stale `lineWidth` store cannot tell Vector/StringImpl occupancy from page-return-to-OS. Occupancy vehicle stays source-only. Do not Circle more occupancy probes on this oracle.
+Device: DONORS=80, DASH 96, CANVSPRAY=300, PREWRITE, no POSTWRITE (Sony memory dialog). Same signature as V676-B / V677. V578/V678 with no intervening candidate allocations still ALIAS idx=10. Stale `lineWidth` store cannot tell Vector/StringImpl occupancy from page-return-to-OS. Occupancy vehicle stays source-only. Do not Circle more occupancy probes on this oracle.
 
 ## 2026-10-23 V676/V677 string interpose CLOSED as occupancy oracle
 
 V678 control (no strings) ALIAS idx=10, POSTWRITE ok, END healthy. Guide not toasted.
-V676 arm A same. V676 B (`repeat(744)` then 300 canvas) and V677 (`repeat(700)` then 300 canvas) both die at PREWRITE with Sony "not enough free system memory". 700 is index 46, not 48, so the crash is slot eviction: any StringImpl spray between free and Canvas2D reclaim returns the 768-class page; later canvas spray is a new span; stale write is unmapped. StringImpl-744 occupancy is not distinguishable with this oracle. Next: V679 lineDash 96-double FastMalloc buffer as the first index-48 alloc after free (pre-created donors, then setLineDash, then canvas spray).
+V676 arm A same. V676 B (`repeat(744)` then 300 canvas) and V677 (`repeat(700)` then 300 canvas) both die at PREWRITE with Sony "not enough free system memory". The original index-46/index-48 interpretation assumed libpas size directories, but the PlayStation configuration disables libpas. The only defensible result is that StringImpl occupancy is not distinguishable with this oracle. V679 then tested a 96-double FastMalloc buffer after free and produced the same pre-write death.
 
 ## 2026-10-23 DASHFORGE 0x1800000 retracted
 

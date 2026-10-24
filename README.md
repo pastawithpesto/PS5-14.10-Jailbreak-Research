@@ -118,7 +118,7 @@ Security research targeting the PS5 WebKit browser on firmware **14.10**. This f
 | Gigacage | **Disabled**, but typed-array backing stores do not reclaim the 768-byte Canvas2D slot on the tested Guide build |
 | IsoHeap | **Disabled** — `WTF_MAKE_ISO_ALLOCATED` compiles to standard `FastMalloc` |
 | ASLR | Enabled (24-bit user / 16-bit kernel entropy) |
-| libpas | Present (`BPLATFORM(PLAYSTATION)` in `BPlatform.h`) — sparse page commit model |
+| Allocator | IsoMalloc and libpas are disabled by the PlayStation CMake configuration; the source-default non-system path uses classic `bmalloc::api` |
 | WebGL | Unavailable |
 | OffscreenCanvas | Unavailable |
 | Workers | Available |

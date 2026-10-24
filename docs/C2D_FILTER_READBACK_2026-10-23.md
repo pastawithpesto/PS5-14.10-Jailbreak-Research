@@ -4,7 +4,7 @@ Date: 2026-10-23. Source only. `tmp/source-audit/wk1400-src`. Guide STOP.
 
 ## CanvasRenderingContext2D size
 
-`WTF_MAKE_ISO_ALLOCATED` on both `CanvasRenderingContext2D` and `CanvasRenderingContext2DBase`. IsoHeap is **off** on PlayStation, so FastMalloc. Device occupancy audit already treated the live object as **768 B = libpas index 48**. Header layout is consistent with a large object: `Vector<State,1> m_stateStack` (inline State is huge: strings, FontProxy, AffineTransform, `Vector<double> lineDash`, …) plus `m_settings`, `m_cachedImageData`, `m_suppliedColors`. Not 24 B. Not TimeRanges-class.
+`WTF_MAKE_ISO_ALLOCATED` on both `CanvasRenderingContext2D` and `CanvasRenderingContext2DBase`. IsoHeap is **off** on PlayStation, so FastMalloc. Device work places the live context allocation at 768 B, but the former `libpas index 48` explanation is invalid because `OptionsPlayStation.cmake` disables libpas. Header layout is consistent with a large object: `Vector<State,1> m_stateStack` (inline State is huge: strings, FontProxy, AffineTransform, `Vector<double> lineDash`, …) plus `m_settings`, `m_cachedImageData`, `m_suppliedColors`. Not 24 B. Not TimeRanges-class.
 
 `getLineDash()` returns `state().lineDash` (`Vector<double>` copy-out to JS as a sequence of doubles). Header still not IDL-writable.
 

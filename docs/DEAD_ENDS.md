@@ -292,9 +292,9 @@ Blob segment gap, Worker Float64Array, Fetch response body, XHR response ArrayBu
 
 V661 reproduced the historical `ImageData → postMessage(..., [data.buffer]) → history.state.data.buffer` disclosure shape. The transfer detached the original buffer, and both `replaceState` and `pushState` recreated a 65,536-byte `Uint8ClampedArray`, but every byte was zero (`nz=0`) and no canonical pointer candidates existed.
 
-### libpas CVE-2025-43531 Race — DEAD: Zero-Init Blocks Leak
+### libpas CVE-2025-43531 Race — NOT APPLICABLE: libpas Disabled
 
-libpas confirmed on PS5 (BPLATFORM(PLAYSTATION) at BPlatform.h:341). The bmalloc/libpas race condition is theoretically present but zero-init on allocation destroys any stale data that survives the race window.
+`OptionsPlayStation.cmake` defines `ENABLE_LIBPAS` OFF and adds `BENABLE_LIBPAS=0`. The generic `BPlatform.h` PlayStation default is overridden by that build definition, so a libpas-specific race is not a valid target for this port configuration.
 
 ### MSE buffered() — DEAD: DoS Only
 
@@ -318,9 +318,9 @@ Those pages write a forged `m_stateStack.m_buffer` through sprayed 768-byte Arra
 
 `0x1800000..0x18002d0` as "readable/stable zero" is **not** a local result. It came from cobrajet302gt in GitHub issue #11 comment 6356111570 (2026-10-23 02:42Z), describing their separate AB-backed vehicle. On this console that AB(768) path hard-died; the comment is not transferable proof. Immediate blockers are **both** native address disclosure **and** a raw Canvas Vector-header write. A pointer alone does not activate DASHFORGE here. No V674, no scan.
 
-### FastMalloc occupancy via StringImpl 744 / lineDash 96 — DEAD: write oracle cannot tell occupant from unmapped
+### FastMalloc occupancy via StringImpl / lineDash — DEAD: write oracle cannot tell occupant from unmapped
 
-libpas 16-byte classes: Canvas2D object is 768 B (index 48). Source fit: Latin-1 `StringImpl` length 744 (24+744) and `Vector<double>` of 96 (`setLineDash`). Device: V678 control with **no** extra allocs still ALIAS idx=10. Any intervening index-48 (or even index-46 `repeat(700)`) alloc then canvas spray then stale `lineWidth` store dies with Sony "not enough free system memory" and no POSTWRITE. Same dialog as dangling write. Crash ≠ occupancy. Do not Circle occupancy probes on this oracle.
+The earlier exact-size argument used libpas's 16-byte directory model, but libpas is disabled in the PlayStation configuration. Candidate `StringImpl` and `lineDash` allocations followed by a stale `lineWidth` store die with Sony "not enough free system memory" and no post-write beacon. V703 then gave an exact-canary same-type control twice, while direct `ArrayBuffer(768)`, direct `setLineDash(96)`, and a bounded 640–896 B lineDash sweep all reached `BOOT` and died before `RESULT`. Those deaths are inconclusive: crash is neither occupancy nor a clean miss. Do not use this stale getter/store as an occupancy oracle.
 
 ### TimeRanges / 24 B MediaTime tag-flip — DEAD: wrong size class, no UAF
 
