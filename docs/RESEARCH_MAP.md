@@ -69,7 +69,7 @@ The info leak is the current blocker. We have full R/W of typed Canvas2D state f
 
 **OOB state stack read:** Stale wrapper retains `m_stateStack.m_size = 9` (from 8 saves) while new context has `m_size = 1`. Reading `last()` indexes at `buffer[8]` = 2800 bytes past end of 1-State buffer. Reads adjacent heap as float64. 48-bit x86-64 pointer is exactly representable as IEEE 754 float64.
 
-**APNG overread (V674):** 1651 heap pointers leaked via animated PNG processing overread on device.
+**APNG overread (V704/V705):** A hidden-default APNG whose first animation frame is narrower than the canvas returns adjacent process bytes through canvas readback. Exact controls and two device loads confirm the disclosure, including aligned heap-shaped values. The source address is decoder-selected; this is not `read64(address)` or an ASLR bypass by itself. See [the device report](reports/APNG_HIDDEN_DEFAULT_DISCLOSURE_1410.md).
 
 ### Planned exploitation path (once info leak solved)
 

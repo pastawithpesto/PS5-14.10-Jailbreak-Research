@@ -14,7 +14,7 @@ Status of the PS5 14.10 WebKit exploitation research as of October 23, 2026.
 | 14-16 | Oct 19-20 | IsoHeap OFF discovery, CVE-2026-43720 reopened, first reclaim attempts |
 | 17-19 | Oct 20-21 | Same-type reclaim V573 CONFIRMED, full R/W via alias V562/V630 |
 | 20-21 | Oct 21-22 | Crash oracle development, heap topology mapping V650-V655 |
-| 22-23 | Oct 22-23 | Info leak hunting, APNG overread (V674), ASLR defeat work |
+| 22-25 | Oct 22-25 | Info leak hunting; hidden-default APNG process disclosure confirmed with V704/V705 controls |
 
 ## Exploit Chain Progress
 
@@ -30,7 +30,7 @@ Status of the PS5 14.10 WebKit exploitation research as of October 23, 2026.
 | Crash oracle | **DONE** | Forge m_stateStack, lineWidth reads 8B at target |
 | Heap topology mapping | **DONE** | V650-V655 binary subdivision, ~187KB resolution |
 | DAZ bypass | **DONE** | BigUint64Array confirmed for raw pointer handling |
-| Info leak / ASLR defeat | **IN PROGRESS** | APNG overread leaks 1651 pointers (V674) |
+| Info leak / ASLR defeat | **IN PROGRESS** | V704/V705 confirm a bounded APNG process disclosure; chosen-address read and module-base identification remain open |
 | Arbitrary R/W | Designed | lineDash Vector forge, needs info leak |
 | Code execution | Not started | vtable hijack or Config overwrite |
 | Kernel exploit | BLOCKED | Needs browser code execution first |

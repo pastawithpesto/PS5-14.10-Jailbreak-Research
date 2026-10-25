@@ -92,17 +92,20 @@ Forging `m_stateStack` (Vector at context offset +112) in an aliased ArrayBuffer
 This gives a binary "mapped / not mapped" oracle plus 8-byte data reads from arbitrary
 addresses.
 
-## ASLR Defeat (V674)
+## Process-memory disclosure (V704/V705)
 
-APNG animated PNG overread leaks 1651 heap pointers from adjacent allocations via
-canvas getImageData. Provides heap address space layout information needed for the
-exploitation chain.
+A hidden-default APNG whose first animation frame is narrower than the IHDR canvas
+causes `PNGImageDecoder::rowAvailable` to read beyond the libpng row. Canvas
+`getImageData` returns the affected pixels. Exact controls and two device loads
+confirm adjacent process bytes and aligned heap-shaped values. The page cannot
+choose the source address, so this is not an arbitrary read or an ASLR bypass by
+itself. See [the device report](../reports/APNG_HIDDEN_DEFAULT_DISCLOSURE_1410.md).
 
 ## Exploitation Chain
 
 1. **UAF trigger** -> `innerCtx` points to freed 768B slot
 2. **Same-type reclaim** -> spray ctx aliases `innerCtx`
-3. **Info leak** -> APNG overread leaks heap pointers (V674)
+3. **Info leak** -> V704/V705 provide a bounded adjacent-row disclosure; a chosen-address read is still missing
 4. **State buffer grow** -> 8x save() = 6400B out-of-line buffer
 5. **State buffer free** -> BMR trigger frees inner ctx + state buffer
 6. **AB reclaim state buffer** -> 200x ArrayBuffer(6400) sprayed
@@ -155,4 +158,4 @@ BigUint64Array for full 64-bit pointer reads once data is in an ArrayBuffer.
 | V573 | Same-type reclaim diagnostic | CONFIRMED: bidirectional R/W |
 | V589 | BMR trigger validation | uaf-ok: inner=OK |
 | V630 | Full 12-API alias diagnostic | ALL APIs pass, alias at idx=11 |
-| V674 | ASLR bypass via APNG overread | 1651 heap pointers leaked |
+| V704/V705 | APNG hidden-default row disclosure | CONFIRMED: exact controls, bounded process bytes; not `read64(address)` |
