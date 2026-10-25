@@ -16,7 +16,7 @@
         "heap_topology_mapping"
       ],
       "blocker": "info_leak_needed_for_aslr_defeat",
-      "info_leak_candidate": "apng_overread_1651_pointers"
+      "info_leak_candidate": "apng_hidden_default_bounded_process_disclosure_v704_v705"
     },
     "metadatatable_overflow": {
       "cve": "CVE-2026-64784",

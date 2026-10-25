@@ -122,6 +122,12 @@ All probes tested on PS5 14.10. Results from device beacon logs.
 | p170 | CSSFontFace UAF via WOFF2 font cycling | Network errors (PS5 rejects WOFF2) |
 | p175 | CSSFontFace UAF via TTF from ArrayBuffer | Deployed, awaiting results |
 
+## Image Decoder Probes (probes/image-decoders/)
+
+| Probe | Purpose | Device Result |
+|-------|---------|---------------|
+| v705 | Hidden-default APNG narrow-frame readback with exact controls and a bounded 510-byte tail | CONFIRMED: controls exact across two loads; triggers return changing adjacent process bytes and aligned heap-shaped values |
+
 ## Canvas UAF Probes  - CVE-2026-43720 (probes/canvas-uaf/ + probes/1410-guide/)
 
 | Probe | Purpose | Device Result |

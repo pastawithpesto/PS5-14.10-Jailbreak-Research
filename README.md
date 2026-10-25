@@ -40,7 +40,7 @@ Every contribution helps keep the models running and the research moving forward
 | Same-Type Reclaim | CONFIRMED | 500x Canvas2D spray reclaims freed slot (V573) |
 | Alias R/W | CONFIRMED | All 12 Canvas2D APIs work through stale wrapper (V630) |
 | Crash Oracle | CONFIRMED | Forged `m_stateStack` reads 8 bytes at arbitrary address (V650-V655) |
-| ASLR Defeat | CONFIRMED | APNG overread leaks 1651 heap pointers (V674) |
+| Process Disclosure | CONFIRMED | Hidden-default APNG row overread returns adjacent process bytes (V704/V705); bounded source, not `read64(address)` |
 | Arbitrary R/W | DESIGNED | Forge lineDash Vector in AB, `setLineDash` writes in-place |
 | Code Exec | **NEXT** | vtable hijack + ROP (no PAC, no JIT, JSC Config unfrozen) |
 | Kernel | BLOCKED | Needs browser code execution first |
@@ -83,12 +83,12 @@ After the trigger, a spray of 500 Canvas2D contexts reclaims the freed 768B slot
 | Matrix Read | `getTransform` (DOMMatrix) | CONFIRMED |
 | State Stack | `save` / `restore` (3-level cycle) | CONFIRMED |
 | Crash Oracle | Forged `m_stateStack` + `lineWidth` read | CONFIRMED |
-| ASLR Bypass | APNG overread leaks heap pointers | CONFIRMED (V674) |
+| Process Disclosure | APNG row overread returns heap-shaped values | CONFIRMED (V704/V705); not an ASLR bypass by itself |
 
 ### Planned Exploitation Path
 
 1. V573 same-type reclaim -- alias to live context
-2. V674 APNG overread -- heap address leaked
+2. V704/V705 APNG overread -- bounded adjacent-row disclosure; chosen-address read still missing
 3. Grow `stateStack` -- realloc frees old buffer -- AB spray reclaims it
 4. Forge lineDash `Vector<double>` in AB (`m_buffer` = target, `m_size` = N)
 5. `getLineDash` through alias -- arbitrary read
