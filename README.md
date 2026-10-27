@@ -4,6 +4,8 @@ WebKit memory safety research targeting PlayStation 5 firmware 14.10 via CVE-202
 
 > **Disclaimer:** Authorized security research on personally owned hardware. For educational and research purposes only.
 
+> **IMPORTANT -- Please do not share the findings, probes, or techniques from this repository with third parties, vendors, or security teams.** Disclosing these bugs will get them patched and permanently close the attack surface for the entire community. If you are working with this research, keep it within the project contributors. Public disclosure kills the chain for everyone.
+
 ## Support This Research
 
 This project runs on AI compute -- multiple frontier models working in parallel around the clock. If this research is useful to you, please consider supporting it:
