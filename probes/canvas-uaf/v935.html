@@ -1,0 +1,539 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="55;url=/"><title>V935</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V935 -- ADDRESS HUNTER + DAZ + ASLR + HDMI/DISPLAY DEEP
+// Exploitation-relevant internals. ZERO UAF.
+var PRE='V935',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var ds=String(d==null?'':d);
+ if(ds.length>1800)ds=ds.slice(0,1800)+'...TRUNC';
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(ds)+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+ds.slice(0,200));
+ try{if(navigator.sendBeacon)navigator.sendBeacon(path);}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+function goHome(){location.replace('/');}
+var wd=setTimeout(function(){bea('FAIL','WATCHDOG','timeout');goHome();},50000);
+
+try{
+bea('ENTER','BOOT','v935|addr-hunter-daz-hdmi|PT='+PT);
+
+// ===== 1. ERROR STACK TRACE ADDRESS LEAK =====
+var stackResults=[];
+try{
+ // Regular error
+ try{null.x;}catch(e){stackResults.push('typeErr='+String(e.stack||'NO-STACK').slice(0,300));}
+ // RangeError
+ try{new Array(-1);}catch(e){stackResults.push('rangeErr='+String(e.stack||'NO-STACK').slice(0,300));}
+ // Recursive
+ try{(function f(){f();})();}catch(e){stackResults.push('recurse='+String(e.stack||'NO-STACK').slice(0,300));}
+ // eval
+ try{eval('throw new Error("probe")');}catch(e){stackResults.push('evalErr='+String(e.stack||'NO-STACK').slice(0,300));}
+ // new Function
+ try{new Function('throw new Error("fnprobe")')();}catch(e){stackResults.push('fnErr='+String(e.stack||'NO-STACK').slice(0,300));}
+ // error properties
+ try{null.x;}catch(e){
+  var props=[];
+  for(var k in e)props.push(k+'='+String(e[k]).slice(0,60));
+  props.push('stack='+typeof e.stack);
+  props.push('line='+e.line);props.push('col='+e.column);
+  props.push('sourceURL='+e.sourceURL);
+  props.push('stackTrace='+e.stackTrace);
+  stackResults.push('errProps='+props.join(';'));
+ }
+}catch(e){stackResults.push('ERR:'+e.message);}
+bea('PASS','STACK-1',stackResults.slice(0,2).join('||'));
+bea('PASS','STACK-2',stackResults.slice(2,4).join('||'));
+bea('PASS','STACK-3',stackResults.slice(4).join('||'));
+
+// ===== 2. FUNCTION toString ADDRESS LEAK =====
+var fnResults=[];
+try{
+ fnResults.push('Array.push='+Function.prototype.toString.call(Array.prototype.push).slice(0,100));
+ fnResults.push('eval='+Function.prototype.toString.call(eval).slice(0,100));
+ fnResults.push('setTimeout='+Function.prototype.toString.call(setTimeout).slice(0,100));
+ fnResults.push('fetch='+Function.prototype.toString.call(fetch).slice(0,100));
+ try{fnResults.push('getContext='+Function.prototype.toString.call(HTMLCanvasElement.prototype.getContext).slice(0,100));}catch(e){}
+ try{fnResults.push('postMessage='+Function.prototype.toString.call(window.postMessage).slice(0,100));}catch(e){}
+ // Check for memory addresses in any toString
+ var fns=[Math.random,JSON.parse,Object.create,Array.from,Date.now,parseInt,
+  String.prototype.charCodeAt,RegExp.prototype.exec];
+ for(var i=0;i<fns.length;i++){
+  try{
+   var s=Function.prototype.toString.call(fns[i]);
+   if(/0x[0-9a-f]{6,}/i.test(s))fnResults.push('HEX-FOUND:'+s.slice(0,120));
+  }catch(e){}
+ }
+}catch(e){fnResults.push('ERR:'+e.message);}
+bea('PASS','FN-TOSTR',fnResults.join('||'));
+
+// ===== 3. DAZ COMPREHENSIVE -- EVERY CHANNEL =====
+var dazResults=[];
+try{
+ // Create denormal float64: smallest subnormal = 5e-324
+ var denormals=[5e-324, 1e-323, 2.2e-308, 4.9e-324];
+ var dnHex=[];
+ // Reference: DataView read of denormal
+ for(var di=0;di<denormals.length;di++){
+  var ab=new ArrayBuffer(8);
+  var dv=new DataView(ab);
+  dv.setFloat64(0,denormals[di]);
+  var hi=dv.getUint32(0);
+  var lo=dv.getUint32(4);
+  dnHex.push('dn'+di+'='+denormals[di]+'|hi=0x'+hi.toString(16)+'|lo=0x'+lo.toString(16));
+ }
+ bea('PASS','DAZ-REF',dnHex.join(';'));
+
+ // Channel tests for smallest denormal
+ var dn=5e-324;
+ // Float64Array
+ var f64=new Float64Array(1);f64[0]=dn;
+ dazResults.push('Float64Array='+(f64[0]===dn?'PRESERVE':'FLUSH:'+f64[0]));
+ // DataView
+ var ab2=new ArrayBuffer(8);var dv2=new DataView(ab2);
+ dv2.setFloat64(0,dn);
+ dazResults.push('DataView='+(dv2.getFloat64(0)===dn?'PRESERVE':'FLUSH:'+dv2.getFloat64(0)));
+ // BigUint64Array
+ try{
+  var bu=new BigUint64Array(1);
+  var ab3=new ArrayBuffer(8);new Float64Array(ab3)[0]=dn;
+  bu[0]=new DataView(ab3).getBigUint64(0);
+  var ab4=new ArrayBuffer(8);new DataView(ab4).setBigUint64(0,bu[0]);
+  var back=new Float64Array(ab4)[0];
+  dazResults.push('BigUint64='+(back===dn?'PRESERVE':'FLUSH:'+back));
+ }catch(e){dazResults.push('BigUint64=ERR:'+e.message);}
+ // Canvas2D setLineDash channel
+ try{
+  var dc=document.createElement('canvas');dc.width=1;dc.height=1;
+  var dctx=dc.getContext('2d');
+  dctx.setLineDash([dn,1]);
+  var ld=dctx.getLineDash();
+  dazResults.push('lineDash='+(ld[0]===dn?'PRESERVE':'FLUSH:'+ld[0]));
+ }catch(e){dazResults.push('lineDash=ERR:'+e.message);}
+ // Canvas2D lineWidth
+ try{
+  var dc2=document.createElement('canvas');dc2.width=1;dc2.height=1;
+  var dctx2=dc2.getContext('2d');
+  dctx2.lineWidth=dn;
+  dazResults.push('lineWidth='+(dctx2.lineWidth===dn?'PRESERVE':'FLUSH:'+dctx2.lineWidth));
+ }catch(e){dazResults.push('lineWidth=ERR:'+e.message);}
+ // Canvas2D globalAlpha
+ try{
+  var dc3=document.createElement('canvas');dc3.width=1;dc3.height=1;
+  var dctx3=dc3.getContext('2d');
+  dctx3.globalAlpha=dn;
+  dazResults.push('globalAlpha='+(dctx3.globalAlpha===dn?'PRESERVE':'FLUSH:'+dctx3.globalAlpha));
+ }catch(e){dazResults.push('globalAlpha=ERR:'+e.message);}
+ // Canvas2D shadowBlur
+ try{
+  var dc4=document.createElement('canvas');dc4.width=1;dc4.height=1;
+  var dctx4=dc4.getContext('2d');
+  dctx4.shadowBlur=dn;
+  dazResults.push('shadowBlur='+(dctx4.shadowBlur===dn?'PRESERVE':'FLUSH:'+dctx4.shadowBlur));
+ }catch(e){dazResults.push('shadowBlur=ERR:'+e.message);}
+ // JSON round-trip
+ try{
+  var j=JSON.parse(JSON.stringify(dn));
+  dazResults.push('JSON='+(j===dn?'PRESERVE':'FLUSH:'+j));
+ }catch(e){dazResults.push('JSON=ERR:'+e.message);}
+ // postMessage round-trip
+ try{
+  var pmDone=false;
+  var mc=new MessageChannel();
+  mc.port1.onmessage=function(e){
+   dazResults.push('postMsg='+(e.data===dn?'PRESERVE':'FLUSH:'+e.data));
+   pmDone=true;
+  };
+  mc.port2.postMessage(dn);
+ }catch(e){dazResults.push('postMsg=ERR:'+e.message);}
+ // structuredClone
+ try{
+  var sc=structuredClone(dn);
+  dazResults.push('structClone='+(sc===dn?'PRESERVE':'FLUSH:'+sc));
+ }catch(e){dazResults.push('structClone=ERR:'+e.message);}
+ // lineDashOffset
+ try{
+  var dc5=document.createElement('canvas');dc5.width=1;dc5.height=1;
+  var dctx5=dc5.getContext('2d');
+  dctx5.lineDashOffset=dn;
+  dazResults.push('lineDashOffset='+(dctx5.lineDashOffset===dn?'PRESERVE':'FLUSH:'+dctx5.lineDashOffset));
+ }catch(e){dazResults.push('lineDashOffset=ERR:'+e.message);}
+ // XOR pointer encoding test (0x4000000000000000)
+ try{
+  var xorAB=new ArrayBuffer(8);
+  var xorDV=new DataView(xorAB);
+  // Simulate: heap pointer 0x0000000867640000 XOR 0x4000000000000000
+  xorDV.setUint32(0,0x40000008,false);xorDV.setUint32(4,0x67640000,false);
+  var xorF64=new Float64Array(xorAB)[0];
+  var dc6=document.createElement('canvas');dc6.width=1;dc6.height=1;
+  var dctx6=dc6.getContext('2d');
+  dctx6.setLineDash([xorF64,1]);
+  var ldx=dctx6.getLineDash();
+  dazResults.push('XOR-ptr='+(ldx[0]===xorF64?'SURVIVE':'FLUSH')+'|val='+xorF64+'|back='+ldx[0]);
+ }catch(e){dazResults.push('XOR-ptr=ERR:'+e.message);}
+}catch(e){dazResults.push('ERR:'+e.message);}
+bea('PASS','DAZ-1',dazResults.slice(0,6).join(';'));
+bea('PASS','DAZ-2',dazResults.slice(6).join(';'));
+
+// ===== 4. NaN BOXING / POINTER TAGGING DETECTION =====
+var nanResults=[];
+try{
+ // JSC uses NaN-boxing. NaN has specific bit patterns.
+ var ab=new ArrayBuffer(8);var f=new Float64Array(ab);var u=new Uint32Array(ab);
+ // Regular NaN
+ f[0]=NaN;
+ nanResults.push('NaN=hi:0x'+u[1].toString(16)+'|lo:0x'+u[0].toString(16));
+ // Infinity
+ f[0]=Infinity;
+ nanResults.push('Inf=hi:0x'+u[1].toString(16)+'|lo:0x'+u[0].toString(16));
+ // -Infinity
+ f[0]=-Infinity;
+ nanResults.push('-Inf=hi:0x'+u[1].toString(16)+'|lo:0x'+u[0].toString(16));
+ // Negative zero
+ f[0]=-0;
+ nanResults.push('-0=hi:0x'+u[1].toString(16)+'|lo:0x'+u[0].toString(16));
+ // purifyNaN test: does JSC's purifyNaN strip custom NaN bits?
+ var ab2=new ArrayBuffer(8);var dv=new DataView(ab2);
+ dv.setUint32(0,0x7FF80001,false);dv.setUint32(4,0xDEADBEEF,false);// custom NaN
+ var customNaN=new Float64Array(ab2)[0];
+ var arr=[customNaN];
+ var back=arr[0];
+ var ab3=new ArrayBuffer(8);new Float64Array(ab3)[0]=back;
+ var dv3=new DataView(ab3);
+ nanResults.push('customNaN-in=7FF80001:DEADBEEF|out='+dv3.getUint32(0,false).toString(16)+':'+dv3.getUint32(4,false).toString(16));
+ // Array storage of NaN
+ var a=[1.1,2.2,customNaN,3.3];
+ var ab4=new ArrayBuffer(8);new Float64Array(ab4)[0]=a[2];
+ var dv4=new DataView(ab4);
+ nanResults.push('arrayNaN='+dv4.getUint32(0,false).toString(16)+':'+dv4.getUint32(4,false).toString(16));
+}catch(e){nanResults.push('ERR:'+e.message);}
+bea('PASS','NAN-BOX',nanResults.join(';'));
+
+// ===== 5. HEAP ALLOCATION FINGERPRINT =====
+var heapResults=[];
+try{
+ // Timing fingerprint for different allocation sizes
+ var sizes=[16,32,64,128,256,512,768,896,1024,2048,4096,8192,65536];
+ for(var si=0;si<sizes.length;si++){
+  var sz=sizes[si];
+  var t0=performance.now();
+  var arr=[];
+  for(var j=0;j<200;j++)arr.push(new ArrayBuffer(sz));
+  var t1=performance.now();
+  arr=null;
+  heapResults.push(sz+'B='+Math.round((t1-t0)*1000)+'us');
+ }
+}catch(e){heapResults.push('ERR:'+e.message);}
+bea('PASS','HEAP-ALLOC',heapResults.join(';'));
+
+// ===== 6. JIT DETECTION =====
+var jitResults=[];
+try{
+ // Hot loop -- does it get faster? (JIT compilation indicator)
+ function hotLoop(n){var s=0;for(var i=0;i<n;i++)s+=i;return s;}
+ // Cold run
+ var t0=performance.now();hotLoop(100000);var t1=performance.now();
+ var cold=t1-t0;
+ // Warm runs
+ for(var w=0;w<5;w++)hotLoop(100000);
+ var t2=performance.now();hotLoop(100000);var t3=performance.now();
+ var warm=t3-t2;
+ jitResults.push('cold='+cold.toFixed(2)+'ms|warm='+warm.toFixed(2)+'ms|speedup='+((cold/Math.max(warm,0.001))).toFixed(2)+'x');
+ // JIT globals
+ var jitGlobals=['$vm','$','noInline','noDFG','noFTL','noOSRExitFuzzing',
+  'createGlobalObject','runString','fullGC','edenGC','gcHeapSize',
+  'numberOfDFGCompiles','jscStack','callerSourceOrigin','drainMicrotasks',
+  'releaseWeakRefs','optimizeNextInvocation','OSRExit'];
+ var found=[];
+ for(var i=0;i<jitGlobals.length;i++){
+  try{if(typeof window[jitGlobals[i]]!=='undefined')found.push(jitGlobals[i]+'='+typeof window[jitGlobals[i]]);}catch(e){}
+ }
+ jitResults.push('jscGlobals='+(found.length?found.join(';'):'NONE'));
+}catch(e){jitResults.push('ERR:'+e.message);}
+bea('PASS','JIT',jitResults.join('||'));
+
+// ===== 7. GC ORACLE (WeakRef + FinalizationRegistry) =====
+var gcResults=[];
+try{
+ var collected=false;
+ var fr=new FinalizationRegistry(function(v){collected=true;});
+ (function(){var obj={x:1};fr.register(obj,'test');})();
+ // Force GC pressure
+ for(var i=0;i<50;i++){var a=new ArrayBuffer(1024*1024);a=null;}
+ // Check after pressure
+ gcResults.push('afterPressure='+collected);
+ // Timing
+ var t0=performance.now();
+ for(var i=0;i<100;i++){var a=new ArrayBuffer(512*1024);a=null;}
+ var t1=performance.now();
+ gcResults.push('100x512KB='+Math.round(t1-t0)+'ms');
+ // WeakRef
+ var wr;
+ (function(){var obj={y:2};wr=new WeakRef(obj);})();
+ for(var i=0;i<50;i++){var a=new ArrayBuffer(1024*1024);a=null;}
+ gcResults.push('weakRef='+(wr.deref()?'ALIVE':'COLLECTED'));
+}catch(e){gcResults.push('ERR:'+e.message);}
+bea('PASS','GC-ORACLE',gcResults.join(';'));
+
+// ===== 8. HDMI + DISPLAY DEEP =====
+var hdmiResults=[];
+try{
+ // Screen object deep
+ hdmiResults.push('screen.w='+screen.width+'|h='+screen.height);
+ hdmiResults.push('screen.availW='+screen.availWidth+'|availH='+screen.availHeight);
+ hdmiResults.push('screen.colorDepth='+screen.colorDepth+'|pixelDepth='+screen.pixelDepth);
+ try{hdmiResults.push('screen.orientation='+screen.orientation.type+'|angle='+screen.orientation.angle);}catch(e){hdmiResults.push('orientation=ERR:'+e.message);}
+ try{hdmiResults.push('screen.isExtended='+screen.isExtended);}catch(e){hdmiResults.push('isExtended='+typeof screen.isExtended);}
+ // window.screenLeft/Top
+ hdmiResults.push('screenLeft='+window.screenLeft+'|screenTop='+window.screenTop);
+ hdmiResults.push('screenX='+window.screenX+'|screenY='+window.screenY);
+ // matchMedia HDMI/display queries
+ var mqTests=[
+  '(color)','(color-gamut: srgb)','(color-gamut: p3)','(color-gamut: rec2020)',
+  '(dynamic-range: standard)','(dynamic-range: high)',
+  '(video-dynamic-range: standard)','(video-dynamic-range: high)',
+  '(color-index)','(monochrome)',
+  '(resolution: 1dppx)','(resolution: 2dppx)','(min-resolution: 96dpi)',
+  '(min-resolution: 150dpi)','(min-resolution: 192dpi)','(min-resolution: 300dpi)',
+  '(aspect-ratio: 16/9)','(aspect-ratio: 4/3)','(aspect-ratio: 21/9)',
+  '(device-aspect-ratio: 16/9)','(device-aspect-ratio: 1920/1080)',
+  '(min-width: 1920px)','(min-width: 3840px)',
+  '(min-height: 1080px)','(min-height: 2160px)',
+  '(display-mode: browser)','(display-mode: standalone)','(display-mode: fullscreen)',
+  '(prefers-color-scheme: dark)','(prefers-color-scheme: light)',
+  '(prefers-reduced-motion: reduce)','(prefers-reduced-motion: no-preference)',
+  '(prefers-contrast: high)','(prefers-contrast: more)','(prefers-contrast: no-preference)',
+  '(forced-colors: active)','(forced-colors: none)',
+  '(inverted-colors: inverted)','(inverted-colors: none)',
+  '(update: fast)','(update: slow)','(update: none)',
+  '(overflow-block: scroll)','(overflow-block: none)',
+  '(overflow-inline: scroll)','(overflow-inline: none)',
+  '(scan: interlace)','(scan: progressive)',
+  '(grid: 0)','(grid: 1)',
+  '(any-hover: hover)','(any-hover: none)',
+  '(any-pointer: fine)','(any-pointer: coarse)','(any-pointer: none)',
+  '(hover: hover)','(hover: none)',
+  '(pointer: fine)','(pointer: coarse)','(pointer: none)',
+  '(scripting: enabled)','(scripting: none)',
+  '(prefers-reduced-data: reduce)','(prefers-reduced-data: no-preference)',
+  '(prefers-reduced-transparency: reduce)',
+  '(color-scheme: dark)','(color-scheme: light)',
+  '(-webkit-device-pixel-ratio: 1)','(-webkit-device-pixel-ratio: 2)',
+  '(-webkit-min-device-pixel-ratio: 1)','(-webkit-min-device-pixel-ratio: 1.5)',
+  '(-webkit-animation: true)','(-webkit-transform-2d: true)','(-webkit-transform-3d: true)',
+  '(-webkit-video-playable-inline: true)'
+ ];
+ var mqYes=[],mqNo=[];
+ for(var i=0;i<mqTests.length;i++){
+  try{
+   var r=window.matchMedia(mqTests[i]);
+   if(r.matches)mqYes.push(mqTests[i]);
+   else mqNo.push(mqTests[i]);
+  }catch(e){}
+ }
+ bea('PASS','HDMI-MQ-YES',mqYes.join(';'));
+ bea('PASS','HDMI-MQ-NO',mqNo.join(';'));
+}catch(e){hdmiResults.push('ERR:'+e.message);}
+bea('PASS','HDMI-SCREEN',hdmiResults.join(';'));
+
+// ===== 9. HDMI COLOR DEPTH + HDR =====
+var hdrResults=[];
+try{
+ // Canvas color accuracy test -- P3 gamut
+ var hc=document.createElement('canvas');hc.width=4;hc.height=4;
+ try{
+  var hctx=hc.getContext('2d',{colorSpace:'display-p3'});
+  if(hctx){
+   hctx.fillStyle='color(display-p3 1 0 0)';hctx.fillRect(0,0,4,4);
+   var hid=hctx.getImageData(0,0,1,1);
+   hdrResults.push('P3-red-px='+hid.data[0]+','+hid.data[1]+','+hid.data[2]+','+hid.data[3]);
+   hctx.fillStyle='color(display-p3 0 1 0)';hctx.fillRect(0,0,4,4);
+   hid=hctx.getImageData(0,0,1,1);
+   hdrResults.push('P3-green-px='+hid.data[0]+','+hid.data[1]+','+hid.data[2]+','+hid.data[3]);
+   hctx.fillStyle='color(display-p3 0 0 1)';hctx.fillRect(0,0,4,4);
+   hid=hctx.getImageData(0,0,1,1);
+   hdrResults.push('P3-blue-px='+hid.data[0]+','+hid.data[1]+','+hid.data[2]+','+hid.data[3]);
+   // Out-of-sRGB test -- P3 red should exceed sRGB range
+   hctx.fillStyle='color(srgb 1 0 0)';hctx.fillRect(0,0,2,2);
+   var srgbPx=hctx.getImageData(0,0,1,1);
+   hctx.fillStyle='color(display-p3 1 0 0)';hctx.fillRect(2,0,2,2);
+   var p3Px=hctx.getImageData(2,0,1,1);
+   hdrResults.push('sRGB-red='+srgbPx.data[0]+'|P3-red='+p3Px.data[0]+'|wider='+(p3Px.data[0]>srgbPx.data[0]));
+  }else{hdrResults.push('P3-ctx=null');}
+ }catch(e){hdrResults.push('P3=ERR:'+e.message);}
+ // Rec2020 attempt
+ try{
+  var r2c=document.createElement('canvas');r2c.width=2;r2c.height=2;
+  var r2ctx=r2c.getContext('2d',{colorSpace:'rec2020'});
+  hdrResults.push('rec2020-ctx='+(r2ctx?'YES':'NO'));
+ }catch(e){hdrResults.push('rec2020-ctx=ERR:'+e.message);}
+ // Video HDR element test
+ try{
+  var v=document.createElement('video');
+  hdrResults.push('video-width='+v.width+'|height='+v.height);
+  var mcap=navigator.mediaCapabilities;
+  if(mcap){
+   mcap.decodingInfo({type:'media-source',video:{contentType:'video/mp4; codecs="hev1.2.4.L150.90"',width:3840,height:2160,bitrate:20000000,framerate:60}}).then(function(r){
+    hdrResults.push('HEVC-4K60-decode='+r.supported+'|smooth='+r.smooth+'|powerEff='+r.powerEfficient);
+    bea('PASS','HDR-MCAP','HEVC4K='+r.supported+'|smooth='+r.smooth+'|pwr='+r.powerEfficient);
+   }).catch(function(e){bea('PASS','HDR-MCAP','ERR:'+e.message);});
+   mcap.decodingInfo({type:'media-source',video:{contentType:'video/mp4; codecs="av01.0.12M.10"',width:3840,height:2160,bitrate:20000000,framerate:60}}).then(function(r){
+    bea('PASS','HDR-MCAP-AV1','AV1-4K60='+r.supported+'|smooth='+r.smooth+'|pwr='+r.powerEfficient);
+   }).catch(function(e){bea('PASS','HDR-MCAP-AV1','ERR:'+e.message);});
+   mcap.decodingInfo({type:'media-source',video:{contentType:'video/mp4; codecs="hev1.2.4.L153.90"',width:7680,height:4320,bitrate:80000000,framerate:60}}).then(function(r){
+    bea('PASS','HDR-MCAP-8K','HEVC-8K60='+r.supported+'|smooth='+r.smooth+'|pwr='+r.powerEfficient);
+   }).catch(function(e){bea('PASS','HDR-MCAP-8K','ERR:'+e.message);});
+  }else{hdrResults.push('mediaCapabilities=undefined');}
+ }catch(e){hdrResults.push('video=ERR:'+e.message);}
+}catch(e){hdrResults.push('ERR:'+e.message);}
+bea('PASS','HDR-COLOR',hdrResults.join(';'));
+
+// ===== 10. ASLR ENTROPY ESTIMATION =====
+var aslrResults=[];
+try{
+ // Store allocation timing pattern, compare across reloads
+ var key='v935_aslr';
+ var prev=null;
+ try{prev=JSON.parse(localStorage.getItem(key));}catch(e){}
+ // Measure current allocation pattern
+ var pattern=[];
+ for(var i=0;i<20;i++){
+  var t0=performance.now();
+  var a=new ArrayBuffer(4096);
+  var t1=performance.now();
+  pattern.push(Math.round((t1-t0)*10000));
+  a=null;
+ }
+ var current={run:Date.now(),pattern:pattern};
+ try{localStorage.setItem(key,JSON.stringify(current));}catch(e){}
+ if(prev){
+  var diff=0;
+  for(var i=0;i<Math.min(prev.pattern.length,pattern.length);i++){
+   if(prev.pattern[i]!==pattern[i])diff++;
+  }
+  aslrResults.push('cross-reload-diff='+diff+'/'+Math.min(prev.pattern.length,pattern.length));
+  aslrResults.push('prev-run='+prev.run+'|this-run='+current.run);
+ }else{aslrResults.push('first-run|pattern='+pattern.join(','));}
+ // Math.random entropy
+ var rands=[];
+ for(var i=0;i<16;i++)rands.push(Math.random());
+ aslrResults.push('random-sample='+rands.slice(0,4).map(function(r){return r.toFixed(8);}).join(','));
+ // Date.now entropy
+ var dates=[];
+ for(var i=0;i<10;i++)dates.push(Date.now());
+ aslrResults.push('dateNow='+dates.join(','));
+ // crypto.getRandomValues
+ try{
+  var rv=new Uint32Array(4);
+  crypto.getRandomValues(rv);
+  aslrResults.push('cryptoRand='+rv[0].toString(16)+','+rv[1].toString(16)+','+rv[2].toString(16)+','+rv[3].toString(16));
+ }catch(e){aslrResults.push('cryptoRand=ERR');}
+}catch(e){aslrResults.push('ERR:'+e.message);}
+bea('PASS','ASLR',aslrResults.join(';'));
+
+// ===== 11. OBJECT INTERNAL PROPERTIES =====
+var objResults=[];
+try{
+ // Object tags
+ var objs=[
+  ['ArrayBuffer',new ArrayBuffer(8)],
+  ['Uint8Array',new Uint8Array(8)],
+  ['Float64Array',new Float64Array(1)],
+  ['DataView',new DataView(new ArrayBuffer(8))],
+  ['Map',new Map()],
+  ['Set',new Set()],
+  ['WeakMap',new WeakMap()],
+  ['WeakSet',new WeakSet()],
+  ['Promise',Promise.resolve()],
+  ['Proxy',new Proxy({},{})],
+  ['RegExp',/test/],
+  ['Date',new Date()],
+  ['Error',new Error('x')]
+ ];
+ for(var i=0;i<objs.length;i++){
+  var o=objs[i][1];
+  var tag='';
+  try{tag=Object.prototype.toString.call(o);}catch(e){tag='ERR';}
+  try{
+   var desc=Object.getOwnPropertyDescriptor(o,'constructor');
+   objResults.push(objs[i][0]+'='+tag+'|ctor='+(desc?'own':'proto'));
+  }catch(e){objResults.push(objs[i][0]+'='+tag);}
+ }
+}catch(e){objResults.push('ERR:'+e.message);}
+bea('PASS','OBJ-TAGS',objResults.join(';'));
+
+// ===== 12. TYPED ARRAY INTERNALS =====
+var taResults=[];
+try{
+ var ab=new ArrayBuffer(64);
+ var views=[
+  ['Int8',new Int8Array(ab)],['Uint8',new Uint8Array(ab)],
+  ['Uint8C',new Uint8ClampedArray(ab)],['Int16',new Int16Array(ab)],
+  ['Uint16',new Uint16Array(ab)],['Int32',new Int32Array(ab)],
+  ['Uint32',new Uint32Array(ab)],['Float32',new Float32Array(ab)],
+  ['Float64',new Float64Array(ab)],['BigInt64',new BigInt64Array(ab)],
+  ['BigUint64',new BigUint64Array(ab)]
+ ];
+ for(var i=0;i<views.length;i++){
+  var v=views[i][1];
+  taResults.push(views[i][0]+'|len='+v.length+'|bytes='+v.byteLength+'|off='+v.byteOffset+'|BYTES_PER='+v.BYTES_PER_ELEMENT);
+ }
+ // Detach behavior
+ try{
+  var dab=new ArrayBuffer(8);
+  var du=new Uint8Array(dab);du[0]=42;
+  var xfer=structuredClone(dab,{transfer:[dab]});
+  taResults.push('detach-origLen='+dab.byteLength+'|viewAfter='+du.length+'|access=');
+  try{var x=du[0];taResults[taResults.length-1]+='val='+x;}catch(e){taResults[taResults.length-1]+='THREW';}
+ }catch(e){taResults.push('detach=ERR:'+e.message);}
+}catch(e){taResults.push('ERR:'+e.message);}
+bea('PASS','TYPED-ARRAYS',taResults.join(';'));
+
+// ===== 13. POINTER-SIZED VALUE BEHAVIOR =====
+var ptrResults=[];
+try{
+ // Simulate reading a pointer-like value through different channels
+ // PS5 heap pointers look like 0x00000008XXXXXXXX
+ var testPtrs=[
+  [0x00000008,0x67640000,'heap-typical'],
+  [0x00000008,0x00000000,'heap-aligned'],
+  [0x00000001,0x00000000,'low-addr'],
+  [0x00000000,0x00001000,'page-addr'],
+  [0x7FFFFFFF,0xFFFFFFFF,'max-user'],
+  [0x00000008,0x7F960000,'heap-B'],
+  [0x40000008,0x67640000,'xor-encoded']
+ ];
+ for(var i=0;i<testPtrs.length;i++){
+  var hi=testPtrs[i][0],lo=testPtrs[i][1],label=testPtrs[i][2];
+  var ab=new ArrayBuffer(8);var dv=new DataView(ab);
+  dv.setUint32(0,hi,false);dv.setUint32(4,lo,false);
+  var f64=new Float64Array(ab)[0];
+  // Round-trip through lineDash
+  var tc=document.createElement('canvas');tc.width=1;tc.height=1;
+  var tctx=tc.getContext('2d');
+  tctx.setLineDash([f64,1]);
+  var ld=tctx.getLineDash();
+  var ab2=new ArrayBuffer(8);new Float64Array(ab2)[0]=ld[0];
+  var dv2=new DataView(ab2);
+  var hiBack=dv2.getUint32(0,false);var loBack=dv2.getUint32(4,false);
+  var survived=(hi===hiBack&&lo===loBack);
+  ptrResults.push(label+'|in='+hi.toString(16)+':'+lo.toString(16)+'|f64='+f64+'|out='+hiBack.toString(16)+':'+loBack.toString(16)+'|'+(survived?'SURVIVE':'FLUSH'));
+ }
+}catch(e){ptrResults.push('ERR:'+e.message);}
+bea('PASS','PTR-RT-1',ptrResults.slice(0,4).join(';'));
+bea('PASS','PTR-RT-2',ptrResults.slice(4).join(';'));
+
+// ===== FINAL =====
+setTimeout(function(){
+ bea('PASS','VERDICT','PT='+PT+'|v935-ADDR-HUNTER-COMPLETE|beacons='+B);
+ clearTimeout(wd);
+ setTimeout(goHome,800);
+},3000);
+
+}catch(e){bea('FAIL','FATAL',String(e&&e.message||e));}
+</script></body></html>

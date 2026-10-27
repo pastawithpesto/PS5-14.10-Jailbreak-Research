@@ -2,7 +2,7 @@
 <html><head><meta charset="utf-8">
 <meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
 <title>V654</title></head>
-<body><pre id="out">V654 — targeted heap scan (ZigZag intel)</pre>
+<body><pre id="out">V654 — targeted heap scan (external intel)</pre>
 <script>
 'use strict';
 var O=document.getElementById('out');
@@ -19,7 +19,7 @@ function f2h(v){_f64[0]=v;return '0x'+('00000000'+_u32[1].toString(16)).slice(-8
 function f2big(v){if(_bu){_f64[0]=v;return '0x'+_bu[0].toString(16);}return f2h(v);}
 
 /*
- * ZIGZAG INTEL (Lua loader, 14.10, sys 674 vmmap):
+ * EXTERNAL INTEL (Lua loader, 14.10, sys 674 vmmap):
  *   SceLibcHeap: 0x310744000-0x310754000 (rec[74])
  *   SceLibcHeap: 0x310D40000-0x310D50000 (sys 572)
  *   Heap objects: 0x3105AF000-0x31071E000 (CClosure etc)

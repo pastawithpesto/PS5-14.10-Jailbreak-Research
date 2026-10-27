@@ -22,11 +22,11 @@ function f2big(v){if(_bu){_f64[0]=v;return '0x'+_bu[0].toString(16);}return f2h(
  * STRATEGY: Fast coarse scan, 64MB jumps across the FULL PS5 address space.
  * Each crash takes ~5 min. Budget: 24 targets = ~2 hours (done by 4am).
  *
- * From ZigZag (Lua loader on 14.10):
+ * From public research (Lua loader on 14.10):
  *   eboot: 0x60388000 (~1.5GB)  libc: 0xCA700000 (~3.4GB)
  *   heap:  0x310000000 (~13GB)  libkernel: 0x819B40000 (~35GB)
  *
- * Code segments are MOST USEFUL — we know their layout from ZigZag.
+ * Code segments are MOST USEFUL — we know their layout from external bench.
  * If we can read from eboot or libc range, we get a CODE pointer
  * which reveals the ASLR slide for that module.
  *

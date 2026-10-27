@@ -19,7 +19,7 @@ function f2h(v){_f64[0]=v;return '0x'+('00000000'+_u32[1].toString(16)).slice(-8
 function f2big(v){if(_bu){_f64[0]=v;return '0x'+_bu[0].toString(16);}return f2h(v);}
 
 /*
- * PS5 MEMORY LAYOUT (from ZigZagBoi1 14.10 Lua loader results):
+ * PS5 MEMORY LAYOUT (from public research, 14.10 Lua loader results):
  *   eboot_base:    0x060388000 (~1.5GB)
  *   libc_base:     0x0CA700000 (~3.4GB)
  *   heap/mmap:     0x310000000-0x312000000 (~12.5-13.3GB)
