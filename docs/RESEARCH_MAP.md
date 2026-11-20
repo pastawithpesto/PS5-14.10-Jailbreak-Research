@@ -71,6 +71,8 @@ The info leak is the current blocker. We have full R/W of typed Canvas2D state f
 
 **APNG overread (V674):** 1651 heap pointers leaked via animated PNG processing overread on device.
 
+> **Issue #70 clarification:** the 1651-pointer count above is a project-reported device result; the four documents reviewed here do not identify an original same-session producer/raw capture independently checked by our team. README.md's exploit-chain table marks the underlying V674 observation "CONFIRMED" as a leak *event*; it does not by itself mean Stage 2 (this section) is complete -- V674 remains one of the current info-leak candidates listed above, not established as completing Stage 2 in the cited documentation.
+
 ### Planned exploitation path (once info leak solved)
 
 1. Leak heap address via OOB state stack read or APNG overread
