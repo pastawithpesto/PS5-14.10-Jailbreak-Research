@@ -211,30 +211,29 @@ class BeaconStore:
             if probe:
                 self._active_probe = probe
 
-        entry = {
-            # Original fields (backward-compatible)
-            "t": stamp, "path": path, "ua": ua[:70],
-            "body": body[:800], "origin": origin,
-            # New fields
-            "ts": iso_stamp, "seq": seq, "method": method,
-            "probe": probe, "event": event,
-        }
+            entry = {
+                # Original fields (backward-compatible)
+                "t": stamp, "path": path, "ua": ua[:70],
+                "body": body[:800], "origin": origin,
+                # New fields
+                "ts": iso_stamp, "seq": seq, "method": method,
+                "probe": probe, "event": event,
+            }
 
-        with self._lock:
             self._recent.append(entry)
             if probe:
                 self._by_probe[probe].append(entry)
 
-        # Persist (line-buffered for crash safety)
-        try:
-            line = json.dumps(entry)
-            if self._log_fh is None:
-                self._log_fh = open(
-                    self._log_path, "a", encoding="utf-8", buffering=1
-                )
-            self._log_fh.write(line + "\n")
-        except OSError:
-            pass
+            # Persist in sequence order (line-buffered).
+            try:
+                line = json.dumps(entry)
+                if self._log_fh is None:
+                    self._log_fh = open(
+                        self._log_path, "a", encoding="utf-8", buffering=1
+                    )
+                self._log_fh.write(line + "\n")
+            except OSError:
+                pass
 
         self._display(entry)
         return entry
