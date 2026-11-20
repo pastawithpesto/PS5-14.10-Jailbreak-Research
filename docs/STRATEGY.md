@@ -52,6 +52,8 @@ All Canvas2D APIs return typed JS values -- no raw heap pointer exposed. 10+ ded
 1. OOB state stack read via save-count mismatch
 2. APNG overread pointer extraction
 
+> **Issue #70 clarification:** V674 appears both in the "Done" list above (the leak event itself is reported/CONFIRMED on device per README.md) and as a "current candidate" here (not yet confirmed as the finalized, repeatable primitive that resolves this blocker). These are not contradictory if "Done" refers only to the reported observation while "current candidate" means further Stage 2 validation is needed; that interpretation and the precise remaining prerequisite require maintainer confirmation. The four documents reviewed here do not identify an original same-session raw capture/producer independently checked by our team.
+
 **Designed but not yet reached:**
 - Forge lineDash Vector in AB for arbitrary R/W
 - vtable hijack or startOfStructureHeap overwrite (Config unfrozen)

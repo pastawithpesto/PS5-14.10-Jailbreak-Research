@@ -45,6 +45,8 @@ Every contribution helps keep the models running and the research moving forward
 | Code Exec | **NEXT** | vtable hijack + ROP (no PAC, no JIT, JSC Config unfrozen) |
 | Kernel | BLOCKED | Needs browser code execution first |
 
+> **Issue #70 clarification:** "ASLR Defeat CONFIRMED" refers to the project-reported V674 APNG-overread device result (1651 heap pointers). The four documents reviewed for issue #70 do not identify a same-session raw capture/producer independently checked by our team, and `docs/RESEARCH_MAP.md` / `docs/STRATEGY.md` still track Stage 2 (a finalized, repeatable arbitrary-address read/write primitive) as IN PROGRESS. The two statuses may describe different milestones: V674 is a reported leak *event*, separate from confirming it has been integrated into a stable, reusable info-leak primitive for the exploit chain. The precise remaining Stage 2 prerequisite requires maintainer clarification. The separately reported Canvas2D **Alias R/W** concerns aliased state fields; it does not establish controlled **arbitrary-address R/W**. See `docs/STRATEGY.md` "Current blocker" section.
+
 ### The Bug
 
 `HTMLCanvasElement::getContext()` reads dictionary options via JS getters BEFORE setting the new context. A re-entrant getter creates a 2d context; the outer call then replaces it with `bitmaprenderer`, freeing the 2d context while its JS wrapper survives.

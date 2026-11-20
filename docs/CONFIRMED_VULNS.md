@@ -57,6 +57,8 @@ Inner ctx created with 8 saves → `m_stateStack.m_size=9`. After BMR free + sam
 
 **Current blocker:** INFO LEAK. All 12 Canvas2D APIs return typed JS values  - no path found to read a raw heap pointer. 10 dedicated info leak paths exhausted (see DEAD_ENDS.md "Info Leak Paths" section). Freed memory reads crash (destructor nulls m_stateStack.m_buffer). AB reclaim zeros data. DontInitialize AB paths return zeros on device. Community help wanted on the info leak primitive.
 
+> **Issue #70 clarification:** `README.md` and `docs/RESEARCH_MAP.md`/`docs/STRATEGY.md` separately report a second info-leak candidate, APNG overread (V674), with a reported device result of 1651 heap pointers. That count is not independently re-verified here and the four documents reviewed here do not identify an original same-session raw capture/producer independently checked by our team. This alone does not establish that the "Current blocker" status above has been resolved; the precise remaining prerequisite requires maintainer clarification.
+
 **Exploitation chain once info leak is solved:** fake lineDash Vector → arbitrary R/W → vtable hijack → ROP → kernel.
 
 **Fix:** Commit 2693828e8d73 (2026-06-29): re-checks `m_context` after dictionary conversion. Not present in WK-1400.
